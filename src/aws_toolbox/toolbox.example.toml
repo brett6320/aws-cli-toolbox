@@ -71,6 +71,7 @@ exclude_accounts = []
 # env_file = "~/path/to/shared.env"
 # profile_prefix = "acme-"
 # roles = []                               # [] = BM_DEFAULT_ROLES
+# role_source_profiles = { "Account-Admin" = "acme-billing-adm" }   # per-role source
 #
 # Role list and profile-name suffixes for assume-role orgs. Set them in [sync]
 # to share them across orgs, or per org to override. "" = no suffix; an
@@ -78,6 +79,7 @@ exclude_accounts = []
 # [sync]
 # roles = ["Platform-Admin", "ReadOnly", "Account-Admin"]
 # role_suffixes = { "Platform-Admin" = "", "ReadOnly" = "-ro", "Account-Admin" = "-adm" }
+# require_short_name = true   # skip accounts without a short name in the table
 
 [netskope]
 bundle_path = "~/.aws/ca-bundle.pem"

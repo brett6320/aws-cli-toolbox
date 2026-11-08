@@ -4,6 +4,7 @@ from unittest import mock
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from aws_toolbox import account_meta, config
@@ -200,16 +201,132 @@ def test_sync_assume_role_mode_end_to_end(isolated_aws, tmp_path, capsys):
     assert ddb.scan(TableName="account-mapping")["Count"] == 4
 
 
+DENIED = ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "Scan")
+
+
+def _mapping_table(rows):
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, (acct, short) in enumerate(rows):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": acct}, "accountShortCode": {"S": short}})
+
+
 @mock_aws
-def test_sync_assume_role_refuses_table_in_another_account(isolated_aws, tmp_path):
+def test_sync_bootstraps_then_backfills_through_generated_profile(isolated_aws, tmp_path):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    ops = "123456789012"  # moto's management account doubles as the table's account
+    sbx = org.create_account(AccountName="Sandbox", Email="s@example.com")["CreateAccountStatus"]["AccountId"]
+    org.create_account(AccountName="No Short", Email="n@example.com")
+    _mapping_table([(ops, "ops"), (sbx, "sbx")])
+    env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DDB_PROFILE=ops-adm\n"
+                        "BM_DEFAULT_ROLES=Platform-Admin,ReadOnly\n")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(env_file, require_short_name=True,
+                    role_suffixes={"Platform-Admin": "", "ReadOnly": "-ro"})
+    used = []
+
+    def ddb_session(settings, org_session):
+        used.append(settings["ddb_profile"])
+        if settings["ddb_profile"] != "corp-master":  # only the generated Platform-Admin profile has access
+            raise DENIED
+        return boto3.Session(region_name="us-east-1")
+
+    with mock.patch.object(account_meta, "get_ddb_session", side_effect=ddb_session):
+        # run 1: no access at all -> names from accounts, require_short_name ignored
+        assert sync_profiles.run(_args(execute=True), cfg) == 0
+        text = path.read_text()
+        assert "[profile corp-master]" in text and "[profile corp-no-short-ro]" in text
+        assert used == ["ops-adm"]
+        # run 2: configured access still fails, the generated profile reads the table
+        used.clear()
+        assert sync_profiles.run(_args(execute=True), cfg) == 0
+    assert used == ["ops-adm", "corp-master"]
+    parser = configparser.RawConfigParser()
+    parser.read(path)
+    generated = sorted(x for x in parser.sections() if x.startswith("profile corp-") and x != "profile corp-src")
+    assert generated == ["profile corp-ops", "profile corp-ops-ro", "profile corp-sbx", "profile corp-sbx-ro"]
+
+
+@mock_aws
+def test_sync_unreadable_table_keeps_existing_profiles(isolated_aws, tmp_path):
     boto3.client("organizations", region_name="us-east-1").create_organization(FeatureSet="ALL")
     env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly\n")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    with mock.patch.object(account_meta, "get_ddb_session", side_effect=DENIED):
+        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 0
+        text = path.read_text()
+        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
+        assert path.read_text() == text
+        assert sync_profiles.run(_args(execute=True, force=True), _role_cfg(env_file)) == 0
+
+
+@mock_aws
+def test_sync_wrong_account_or_missing_table_is_not_bootstrapped(isolated_aws, tmp_path):
+    boto3.client("organizations", region_name="us-east-1").create_organization(FeatureSet="ALL")
+    env_file = tmp_path / "bm.env"
+    # BM_DDB_PROFILE resolves to moto's account, not the table's: refused, not "no access"
     env_file.write_text("BM_DDB_TABLE_ARN=arn:aws:dynamodb:us-east-1:999999999999:table/account-mapping\n"
                         "BM_DDB_PROFILE=corp-src\n")
-    (isolated_aws / "config").write_text(CORP_CONFIG)
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
     with mock.patch.object(account_meta, "get_session", return_value=boto3.Session(region_name="us-east-1")):
         assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
-    assert "managed profiles" not in (isolated_aws / "config").read_text()
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")  # right account, but no such table
+    assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
+    assert "managed profiles" not in path.read_text()
+
+
+def test_read_table_tries_each_generated_profile_in_role_order(isolated_aws):
+    from aws_toolbox import awsconfig
+    text = awsconfig.replace_managed_block(CORP_CONFIG, (
+        "[profile corp-ops-readonly]\nrole_arn = arn:aws:iam::123456789012:role/ReadOnly\nsource_profile = corp-src\n\n"
+        "[profile corp-ops]\nrole_arn = arn:aws:iam::123456789012:role/Platform-Admin\nsource_profile = corp-src\n\n"
+        "[profile corp-other]\nrole_arn = arn:aws:iam::222222222222:role/Platform-Admin\nsource_profile = corp-src"),
+        "corp")
+    text = awsconfig.replace_managed_block(
+        text, "[profile x-ops]\nrole_arn = arn:aws:iam::123456789012:role/Platform-Admin\nsource_profile = s", "other")
+    roles = ["Platform-Admin", "ReadOnly"]
+    assert sync_profiles.generated_profiles_for(text, "corp", "123456789012", roles) == ["corp-ops", "corp-ops-readonly"]
+    assert sync_profiles.generated_profiles_for(text, "other", "123456789012", roles) == ["x-ops"]
+    assert sync_profiles.generated_profiles_for(text, "corp", "333333333333", roles) == []
+
+    used = []
+
+    def ddb_session(settings, org_session):
+        used.append(settings["ddb_profile"])
+        if settings["ddb_profile"] != "corp-ops-readonly":
+            raise DENIED
+        return mock.Mock()
+    s = account_meta.resolve_settings({"ddb_table_arn": TABLE_ARN, "ddb_profile": "ops-adm", "roles": roles})
+    with mock.patch.object(account_meta, "get_ddb_session", side_effect=ddb_session), \
+         mock.patch.object(sync_profiles, "get_client"), \
+         mock.patch.object(account_meta, "fetch_metadata", return_value=({"1": {}}, set())):
+        assert sync_profiles.read_table("corp", s, None, text) == ({"1": {}}, set())
+    assert used == ["ops-adm", "corp-ops", "corp-ops-readonly"]
+
+    # a fallback profile that resolves to the wrong account is an error, not "no access"
+    def wrong_account(settings, org_session):
+        if settings["ddb_profile"] == "ops-adm":
+            raise DENIED
+        raise RuntimeError("DynamoDB credentials are for account 222222222222")
+    with mock.patch.object(account_meta, "get_ddb_session", side_effect=wrong_account):
+        with pytest.raises(sync_profiles.TableError, match="222222222222"):
+            sync_profiles.read_table("corp", s, None, text)
+
+
+def test_require_short_name_must_be_bool(isolated_aws, tmp_path):
+    (isolated_aws / "config").write_text(CORP_CONFIG)
+    env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
+    assert sync_profiles.run(_args(), _role_cfg(env_file, require_short_name="false")) == 2
 
 
 def test_sync_assume_role_config_errors(isolated_aws, tmp_path):
@@ -320,3 +437,52 @@ def test_fetch_org_inactive_filter(include):
     org.close_account(AccountId=acct)
     ids = set(account_meta.fetch_org(org, include)["accounts"])
     assert (acct in ids) is include
+
+
+@mock_aws
+def test_require_short_name_skips_accounts_without_one(isolated_aws, tmp_path):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    ids = {n: org.create_account(AccountName=n, Email=f"{n}@example.com")["CreateAccountStatus"]["AccountId"]
+           for n in ("Sandbox", "Network", "Unnamed", "NoRow")}
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, (name, short) in enumerate((("Sandbox", "sbx"), ("Network", "net"), ("Unnamed", " "))):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": ids[name]}, "accountShortCode": {"S": short}})
+    env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly,Account-Admin\n")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(env_file, require_short_name=True,
+                    role_suffixes={"ReadOnly": "-ro", "Account-Admin": "-adm"})
+    assert sync_profiles.run(_args(execute=True), cfg) == 0
+    parser = configparser.RawConfigParser()
+    parser.read(path)
+    generated = sorted(s for s in parser.sections() if s.startswith("profile corp-") and s != "profile corp-src")
+    # the table's own account (moto's management account) is kept without a short name
+    assert generated == ["profile corp-master-adm", "profile corp-master-ro", "profile corp-net-adm",
+                         "profile corp-net-ro", "profile corp-sbx-adm", "profile corp-sbx-ro"]
+    assert parser["profile corp-sbx-adm"]["role_arn"] == f"arn:aws:iam::{ids['Sandbox']}:role/Account-Admin"
+
+
+def test_role_source_profiles_per_role(isolated_aws, tmp_path):
+    org = {"exclude_accounts": [], "profile_prefix": "", "source_profile": "corp-src",
+           "role_source_profiles": {"Account-Admin": "corp-adm"}}
+    accounts = [{"id": "111111111111", "name": "Net", "shortName": "net", "domain": "Core", "env": None}]
+    roles = sync_profiles.role_suffixes(["Platform-Admin", "Account-Admin"], {"Platform-Admin": "", "Account-Admin": "-adm"})
+    parser = configparser.RawConfigParser()
+    parser.read_string(sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                                      roles, "aws", reserved=set()))
+    assert parser["profile net"]["source_profile"] == "corp-src"
+    assert parser["profile net-adm"]["source_profile"] == "corp-adm"
+
+    env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
+    (isolated_aws / "config").write_text(
+        CORP_CONFIG + "\n[profile other-adm]\nsso_start_url = https://other.awsapps.com/start\nsso_region = us-east-1\n")
+    # undefined, or from another portal: refused before any AWS call
+    assert sync_profiles.run(_args(), _role_cfg(env_file, role_source_profiles={"Account-Admin": "nope"})) == 2
+    assert sync_profiles.run(_args(), _role_cfg(env_file, role_source_profiles={"Account-Admin": "other-adm"})) == 2
