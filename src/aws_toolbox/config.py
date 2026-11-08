@@ -28,13 +28,22 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "profile_prefix": "",
         "exclude_accounts": [],
         # Assume-role mode (set source_profile): accounts come from the org tree,
-        # short names/domains/environments from the account-mapping table named
-        # in env_file, and one role_arn profile per role, chained from
+        # short names/domains/environments from the account-mapping table at
+        # ddb_table_arn, and one role_arn profile per role, chained from
         # source_profile. roles = [] means BM_DEFAULT_ROLES. role_suffixes maps a
         # role to its profile-name suffix ("" = none); unmapped roles get
         # "-<role name>".
         "source_profile": "",
-        "env_file": "",
+        # Table settings. Empty (or include_inactive unset) falls back to the
+        # matching BM_* environment variable, then the built-in default.
+        "ddb_table_arn": "",
+        "ddb_profile": "",
+        "ddb_role_name": "",
+        "attr_account_id": "",
+        "attr_short_name": "",
+        "attr_ou": "",
+        "attr_environment": "",
+        "include_inactive": None,
         "roles": [],
         "role_suffixes": {},
         # true: only accounts with a short name in the table get profiles
@@ -57,7 +66,8 @@ ORG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # profile, prefix, exclusions) are never inherited, so a missing per-org value
 # can't point one org's profiles at another org's portal.
 INHERITED_SYNC_KEYS = ("readonly_role", "admin_role", "admin_suffix", "roles", "role_suffixes",
-                       "require_short_name")
+                       "require_short_name", "ddb_role_name", "attr_account_id", "attr_short_name",
+                       "attr_ou", "attr_environment", "include_inactive")
 
 
 def aws_dir() -> Path:
@@ -97,8 +107,17 @@ def orgs(cfg: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     Without any [orgs.<name>] tables, [sync] is a single unnamed org ("").
     """
     defined = cfg.get("orgs") or {}
+    tables = {"sync": cfg["sync"], **{f"orgs.{n}": v for n, v in defined.items() if isinstance(v, dict)}}
+    for where, values in tables.items():
+        if "env_file" in values:
+            raise ValueError(f"[{where}]: env_file was removed; set ddb_table_arn (and any other BM_* "
+                             "values, e.g. ddb_profile) in toolbox.toml instead")
     if not defined:
         return {"": dict(cfg["sync"])}
+    for key in ("ddb_table_arn", "ddb_profile"):
+        if cfg["sync"].get(key):
+            raise ValueError(f"[sync] {key} isn't used once [orgs.*] tables exist; "
+                             f"set it in each [orgs.<name>] instead")
     out = {}
     for name, values in defined.items():
         if not ORG_NAME_RE.match(name):

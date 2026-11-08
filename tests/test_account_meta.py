@@ -29,18 +29,18 @@ def test_normalize_env(raw, env):
     assert account_meta.normalize_env(raw) == env
 
 
-def test_resolve_settings_precedence_and_arn(tmp_path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text(f"export BM_DDB_TABLE_ARN='{TABLE_ARN}'\nBM_DEFAULT_ROLES=ReadOnly, Administrator\n"
-                        "BM_ATTR_OU=domain\nAWS_REGION=us-east-2\n")
-    monkeypatch.setenv("BM_ATTR_OU", "businessDomain")  # environment beats .env
-    s = account_meta.resolve_settings({"roles": "Admin"}, account_meta.read_dotenv(env_file))
-    assert s["roles"] == ["Admin"]  # kwargs beat both
+def test_resolve_settings_precedence_and_arn(monkeypatch):
+    for var, value in (("BM_DDB_TABLE_ARN", TABLE_ARN), ("BM_DEFAULT_ROLES", "ReadOnly, Administrator"),
+                       ("BM_ATTR_OU", "businessDomain"), ("AWS_REGION", "us-east-2")):
+        monkeypatch.setenv(var, value)
+    s = account_meta.resolve_settings({"roles": "Admin"})
+    assert s["roles"] == ["Admin"]  # kwargs beat the environment
     assert s["attr_ou"] == "businessDomain"
     assert (s["ddb_table"], s["ddb_account_id"], s["ddb_region"]) == ("account-mapping", "123456789012", "us-east-1")
     assert s["region"] == "us-east-2" and s["include_inactive"] is False
-    with pytest.raises(ValueError, match="required"):
-        account_meta.resolve_settings({})
+    monkeypatch.delenv("BM_DDB_TABLE_ARN")
+    none = account_meta.resolve_settings({})  # no table: optional, names come from accounts
+    assert none["ddb_table"] is none["ddb_account_id"] is none["ddb_region"] is None
     with pytest.raises(ValueError, match="Not a DynamoDB table ARN"):
         account_meta.resolve_settings({"ddb_table_arn": "arn:aws:s3:::bucket"})
 
@@ -125,6 +125,43 @@ def test_orgs_inherit_roles_and_suffixes_from_sync():
     assert orgs["b"]["role_suffixes"] == {"ReadOnly": "-view"}
 
 
+def test_env_file_is_rejected_with_migration_hint():
+    cfg = config.load()
+    cfg["sync"]["env_file"] = "x.env"
+    with pytest.raises(ValueError, match="env_file was removed; set ddb_table_arn"):
+        config.orgs(cfg)
+    del cfg["sync"]["env_file"]
+    cfg["orgs"] = {"acme": {"sso_session": "a", "management_profile": "m", "env_file": "x.env"}}
+    with pytest.raises(ValueError, match=r"\[orgs.acme\]: env_file was removed"):
+        config.orgs(cfg)
+
+
+def test_table_keys_per_org_and_inherited_attrs():
+    cfg = config.load()
+    cfg["sync"].update(attr_ou="domain", include_inactive=True)
+    cfg["orgs"] = {"acme": {"sso_session": "a", "management_profile": "m", "ddb_table_arn": TABLE_ARN},
+                   "globex": {"sso_session": "b", "management_profile": "n", "attr_ou": "bu"}}
+    orgs = config.orgs(cfg)
+    assert orgs["acme"]["attr_ou"] == "domain" and orgs["acme"]["include_inactive"] is True  # shared
+    assert orgs["globex"]["attr_ou"] == "bu"                                                # overridden
+    assert orgs["acme"]["ddb_table_arn"] == TABLE_ARN and orgs["globex"]["ddb_table_arn"] == ""
+    for key in ("ddb_table_arn", "ddb_profile"):  # per org only: a [sync] value would be ignored
+        with pytest.raises(ValueError, match=f"\\[sync\\] {key} isn't used"):
+            config.orgs({**cfg, "sync": {**cfg["sync"], key: "x"}})
+
+
+def test_meta_settings_named_org_ignores_table_env(isolated_aws, monkeypatch):
+    monkeypatch.setenv("BM_DDB_TABLE_ARN", TABLE_ARN)
+    monkeypatch.setenv("BM_DDB_PROFILE", "someone-elses")
+    org = config.orgs(_role_cfg(ddb_table_arn="", ddb_profile=" "))[""]
+    named = sync_profiles.meta_settings(org, _args(), "acme")
+    assert named["ddb_table_arn"] == "" and named["ddb_table"] is None and named["ddb_profile"] == ""
+    single = sync_profiles.meta_settings(org, _args())  # [sync] only: the environment still applies
+    assert single["ddb_table"] == "account-mapping" and single["ddb_profile"] == "someone-elses"
+    flagged = sync_profiles.meta_settings(org, _args(ddb_table_arn=TABLE_ARN), "acme")
+    assert flagged["ddb_table"] == "account-mapping"
+
+
 # --- sync in assume-role mode ----------------------------------------------
 
 def _args(**kw):
@@ -134,10 +171,10 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
-def _role_cfg(env_file, **sync):
+def _role_cfg(**sync):
     cfg = config.load()
     cfg["sync"].update({"sso_session": "corp", "management_profile": None, "source_profile": "corp-src",
-                        "env_file": str(env_file), "profile_prefix": "corp-"}, **sync)
+                        "ddb_table_arn": TABLE_ARN, "profile_prefix": "corp-"}, **sync)
     return cfg
 
 
@@ -177,12 +214,10 @@ def test_sync_assume_role_mode_end_to_end(isolated_aws, tmp_path, capsys):
             "accountNumber": acct, "accountShortCode": {"S": short}, "ou": {"S": ou_name},
             "environment": {"S": env}})
 
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly,Administrator\n")
     path = isolated_aws / "config"
     path.write_text(CORP_CONFIG)
 
-    cfg = _role_cfg(env_file, role_suffixes={"ReadOnly": "-ro", "Administrator": "-adm"})
+    cfg = _role_cfg(roles=["ReadOnly", "Administrator"], role_suffixes={"ReadOnly": "-ro", "Administrator": "-adm"})
     assert sync_profiles.run(_args(execute=True), cfg) == 0
     text = path.read_text()
     parser = configparser.RawConfigParser()
@@ -222,12 +257,9 @@ def test_sync_bootstraps_then_backfills_through_generated_profile(isolated_aws, 
     sbx = org.create_account(AccountName="Sandbox", Email="s@example.com")["CreateAccountStatus"]["AccountId"]
     org.create_account(AccountName="No Short", Email="n@example.com")
     _mapping_table([(ops, "ops"), (sbx, "sbx")])
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DDB_PROFILE=ops-adm\n"
-                        "BM_DEFAULT_ROLES=Platform-Admin,ReadOnly\n")
     path = isolated_aws / "config"
     path.write_text(CORP_CONFIG)
-    cfg = _role_cfg(env_file, require_short_name=True,
+    cfg = _role_cfg(ddb_profile="ops-adm", roles=["Platform-Admin", "ReadOnly"], require_short_name=True,
                     role_suffixes={"Platform-Admin": "", "ReadOnly": "-ro"})
     used = []
 
@@ -254,33 +286,47 @@ def test_sync_bootstraps_then_backfills_through_generated_profile(isolated_aws, 
 
 
 @mock_aws
+def test_sync_without_table_warns_and_uses_account_names(isolated_aws, caplog):
+    orgs = boto3.client("organizations", region_name="us-east-1")
+    orgs.create_organization(FeatureSet="ALL")
+    orgs.create_account(AccountName="Shared Services", Email="s@example.com")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(ddb_table_arn="", roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"},
+                    require_short_name=True)
+    with mock.patch.object(account_meta, "get_ddb_session") as ddb:
+        assert sync_profiles.run(_args(execute=True), cfg) == 0
+        assert sync_profiles.run(_args(execute=True), cfg) == 0  # an existing block is rebuilt too
+    ddb.assert_not_called()
+    assert "no metadata table configured" in caplog.text and "ignoring require_short_name" in caplog.text
+    assert "[profile corp-shared-services-ro]" in path.read_text()
+
+
+@mock_aws
 def test_sync_unreadable_table_keeps_existing_profiles(isolated_aws, tmp_path):
     boto3.client("organizations", region_name="us-east-1").create_organization(FeatureSet="ALL")
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly\n")
     path = isolated_aws / "config"
     path.write_text(CORP_CONFIG)
     with mock.patch.object(account_meta, "get_ddb_session", side_effect=DENIED):
-        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 0
+        assert sync_profiles.run(_args(execute=True), _role_cfg(roles=["ReadOnly"])) == 0
         text = path.read_text()
-        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
+        assert sync_profiles.run(_args(execute=True), _role_cfg(roles=["ReadOnly"])) == 1
         assert path.read_text() == text
-        assert sync_profiles.run(_args(execute=True, force=True), _role_cfg(env_file)) == 0
+        assert sync_profiles.run(_args(execute=True, force=True), _role_cfg(roles=["ReadOnly"])) == 0
 
 
 @mock_aws
 def test_sync_wrong_account_or_missing_table_is_not_bootstrapped(isolated_aws, tmp_path):
     boto3.client("organizations", region_name="us-east-1").create_organization(FeatureSet="ALL")
-    env_file = tmp_path / "bm.env"
-    # BM_DDB_PROFILE resolves to moto's account, not the table's: refused, not "no access"
-    env_file.write_text("BM_DDB_TABLE_ARN=arn:aws:dynamodb:us-east-1:999999999999:table/account-mapping\n"
-                        "BM_DDB_PROFILE=corp-src\n")
+    # ddb_profile resolves to moto's account, not the table's: refused, not "no access"
+    wrong = _role_cfg(ddb_table_arn="arn:aws:dynamodb:us-east-1:999999999999:table/account-mapping",
+                      ddb_profile="corp-src")
     path = isolated_aws / "config"
     path.write_text(CORP_CONFIG)
     with mock.patch.object(account_meta, "get_session", return_value=boto3.Session(region_name="us-east-1")):
-        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")  # right account, but no such table
-    assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
+        assert sync_profiles.run(_args(execute=True), wrong) == 1
+    # right account, but no such table
+    assert sync_profiles.run(_args(execute=True), _role_cfg(roles=["ReadOnly"])) == 1
     assert "managed profiles" not in path.read_text()
 
 
@@ -324,30 +370,25 @@ def test_read_table_tries_each_generated_profile_in_role_order(isolated_aws):
 
 def test_require_short_name_must_be_bool(isolated_aws, tmp_path):
     (isolated_aws / "config").write_text(CORP_CONFIG)
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
-    assert sync_profiles.run(_args(), _role_cfg(env_file, require_short_name="false")) == 2
+    assert sync_profiles.run(_args(), _role_cfg(require_short_name="false")) == 2
 
 
-def test_sync_assume_role_config_errors(isolated_aws, tmp_path):
+def test_sync_assume_role_config_errors(isolated_aws, caplog):
     (isolated_aws / "config").write_text(CORP_CONFIG)
-    missing = tmp_path / "nope.env"
-    assert sync_profiles.run(_args(), _role_cfg(missing)) == 2  # env_file not found
-    empty = tmp_path / "empty.env"
-    empty.write_text("")
-    assert sync_profiles.run(_args(), _role_cfg(empty)) == 2  # no table ARN
-    good = tmp_path / "bm.env"
-    good.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
-    assert sync_profiles.run(_args(), _role_cfg(good, source_profile="undefined")) == 2
+    for cfg, message in ((_role_cfg(ddb_table_arn=1), "ddb_table_arn must be a string"),
+                         (_role_cfg(include_inactive="yes"), "include_inactive must be true or false"),
+                         (_role_cfg(env_file="x.env"), "env_file was removed"),
+                         (_role_cfg(source_profile="undefined"), "undefined")):
+        caplog.clear()
+        assert sync_profiles.run(_args(), cfg) == 2
+        assert message in caplog.text
 
 
 def test_sync_source_profile_must_be_the_orgs(isolated_aws, tmp_path):
     from test_commands import MULTI_ORG_CONFIG, _multi_org_cfg
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
     (isolated_aws / "config").write_text(MULTI_ORG_CONFIG)
     cfg = _multi_org_cfg()
-    cfg["orgs"]["globex"].update(source_profile="acme-mgmt", env_file=str(env_file))
+    cfg["orgs"]["globex"].update(source_profile="acme-mgmt", ddb_table_arn=TABLE_ARN)
     assert sync_profiles.run(_args(org=["globex"]), cfg) == 2
     # table flags apply to one org at a time
     assert sync_profiles.run(_args(ddb_profile="x"), _multi_org_cfg()) == 2
@@ -355,9 +396,7 @@ def test_sync_source_profile_must_be_the_orgs(isolated_aws, tmp_path):
 
 def test_sync_rejects_clashing_role_suffixes(isolated_aws, tmp_path):
     (isolated_aws / "config").write_text(CORP_CONFIG)
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=A,B\n")
-    cfg = _role_cfg(env_file, role_suffixes={"A": "-x", "B": "-x"})
+    cfg = _role_cfg(roles=["A", "B"], role_suffixes={"A": "-x", "B": "-x"})
     assert sync_profiles.run(_args(), cfg) == 2
 
 
@@ -376,8 +415,6 @@ def test_build_role_block_neutralizes_control_characters():
 
 def test_sync_assume_role_refuses_when_no_account_matches_table(isolated_aws, tmp_path):
     (isolated_aws / "config").write_text(CORP_CONFIG)
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly\n")
     tree = {"tree": {}, "accounts": {"111111111111": {"id": "111111111111", "name": "Net", "email": "",
                                                     "state": "ACTIVE", "orgPath": []}}}
     session = mock.Mock()
@@ -387,9 +424,9 @@ def test_sync_assume_role_refuses_when_no_account_matches_table(isolated_aws, tm
          mock.patch.object(account_meta, "fetch_org", return_value=tree), \
          mock.patch.object(account_meta, "get_ddb_session"), \
          mock.patch.object(account_meta, "fetch_metadata", return_value=({}, set())):
-        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
+        assert sync_profiles.run(_args(execute=True), _role_cfg(roles=["ReadOnly"])) == 1
         assert "managed profiles" not in (isolated_aws / "config").read_text()
-        assert sync_profiles.run(_args(execute=True, force=True), _role_cfg(env_file)) == 0
+        assert sync_profiles.run(_args(execute=True, force=True), _role_cfg(roles=["ReadOnly"])) == 0
     assert "[profile corp-net-readonly]" in (isolated_aws / "config").read_text()
 
 
@@ -398,27 +435,26 @@ def test_sync_assume_role_refuses_when_no_account_matches_table(isolated_aws, tm
     ("ReadOnly, Admin", ["ReadOnly", "Admin"]),
 ])
 def test_meta_settings_roles_list_or_string(isolated_aws, tmp_path, roles, expected):
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
-    org = config.orgs(_role_cfg(env_file, roles=roles))[""]
+    org = config.orgs(_role_cfg(roles=roles))[""]
     assert sync_profiles.meta_settings(org, _args())["roles"] == expected
 
 
-def test_meta_settings_warns_when_environment_hides_env_file(isolated_aws, tmp_path, monkeypatch, caplog):
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_ATTR_OU=ou\n")
+def test_meta_settings_toml_beats_environment_beats_default(isolated_aws, monkeypatch):
     monkeypatch.setenv("BM_ATTR_OU", "domain")
-    org = config.orgs(_role_cfg(env_file))[""]
-    assert sync_profiles.meta_settings(org, _args())["attr_ou"] == "domain"
-    assert "BM_ATTR_OU from the environment overrides" in caplog.text
+    monkeypatch.setenv("BM_ATTR_SHORT_NAME", "code")
+    monkeypatch.setenv("BM_INCLUDE_INACTIVE", "true")
+    org = config.orgs(_role_cfg(attr_ou="businessDomain", include_inactive=False))[""]
+    s = sync_profiles.meta_settings(org, _args())
+    assert s["attr_ou"] == "businessDomain" and s["include_inactive"] is False  # toml
+    assert s["attr_short_name"] == "code"                                       # environment
+    assert s["attr_environment"] == "environment"                               # default
+    assert sync_profiles.meta_settings(org, _args(attr_ou="flag"))["attr_ou"] == "flag"
 
 
 def test_sync_only_source_profile_portal_checked(isolated_aws, tmp_path):
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
     (isolated_aws / "config").write_text(
         CORP_CONFIG + "\n[profile other]\nsso_start_url = https://other.awsapps.com/start\nsso_region = us-east-1\n")
-    assert sync_profiles.run(_args(), _role_cfg(env_file, source_profile="other")) == 2
+    assert sync_profiles.run(_args(), _role_cfg(source_profile="other")) == 2
 
 
 def test_table_flags_rejected_for_sso_mode_org(isolated_aws):
@@ -452,11 +488,9 @@ def test_require_short_name_skips_accounts_without_one(isolated_aws, tmp_path):
     for i, (name, short) in enumerate((("Sandbox", "sbx"), ("Network", "net"), ("Unnamed", " "))):
         ddb.put_item(TableName="account-mapping", Item={
             "pk": {"S": str(i)}, "accountNumber": {"S": ids[name]}, "accountShortCode": {"S": short}})
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly,Account-Admin\n")
     path = isolated_aws / "config"
     path.write_text(CORP_CONFIG)
-    cfg = _role_cfg(env_file, require_short_name=True,
+    cfg = _role_cfg(roles=["ReadOnly", "Account-Admin"], require_short_name=True,
                     role_suffixes={"ReadOnly": "-ro", "Account-Admin": "-adm"})
     assert sync_profiles.run(_args(execute=True), cfg) == 0
     parser = configparser.RawConfigParser()
@@ -479,10 +513,8 @@ def test_role_source_profiles_per_role(isolated_aws, tmp_path):
     assert parser["profile net"]["source_profile"] == "corp-src"
     assert parser["profile net-adm"]["source_profile"] == "corp-adm"
 
-    env_file = tmp_path / "bm.env"
-    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\n")
     (isolated_aws / "config").write_text(
         CORP_CONFIG + "\n[profile other-adm]\nsso_start_url = https://other.awsapps.com/start\nsso_region = us-east-1\n")
     # undefined, or from another portal: refused before any AWS call
-    assert sync_profiles.run(_args(), _role_cfg(env_file, role_source_profiles={"Account-Admin": "nope"})) == 2
-    assert sync_profiles.run(_args(), _role_cfg(env_file, role_source_profiles={"Account-Admin": "other-adm"})) == 2
+    assert sync_profiles.run(_args(), _role_cfg(role_source_profiles={"Account-Admin": "nope"})) == 2
+    assert sync_profiles.run(_args(), _role_cfg(role_source_profiles={"Account-Admin": "other-adm"})) == 2
