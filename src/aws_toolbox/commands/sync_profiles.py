@@ -163,8 +163,8 @@ def build_role_block(accounts: list[dict], org: dict, defaults: dict, roles: lis
     counts: dict[str, int] = {}
     for acct in kept:
         counts[base_for(acct)] = counts.get(base_for(acct), 0) + 1
-    sections, taken = [], set(reserved)
-    expected: dict[str, set[str]] = {}
+    taken = set(reserved)
+    planned: list[tuple[dict, list[tuple[str, str]]]] = []
     for acct in sorted(kept, key=lambda a: (a["shortName"].lower(), a["id"])):
         base = base_for(acct)
         names = [(f"{base}{suffix}", role) for role, suffix in roles]
@@ -173,13 +173,40 @@ def build_role_block(accounts: list[dict], org: dict, defaults: dict, roles: lis
                         base, acct["shortName"], acct["id"], base, acct["id"])
             base = f"{base}-{acct['id']}"
             names = [(f"{base}{suffix}", role) for role, suffix in roles]
-        comment = (f"# {_comment_text(acct['name'])} ({acct['id']}) | domain: {_comment_text(acct['domain'])} | "
-                   f"env: {acct['env'] or '-'}")
+        kept_names = []
         for name, role in names:
             if name in taken:
                 log.warning("Skipping %s: name already in use", name)
                 continue
             taken.add(name)
+            kept_names.append((name, role))
+        planned.append((acct, kept_names))
+
+    if org.get("account_name_aliases"):
+        # Aliases come second: a short name always wins, and an alias that would
+        # clash with anything is skipped rather than given an ID.
+        alias_bases: dict[str, int] = {}
+        for acct, _ in planned:
+            alias = awsconfig.profile_name_for(acct["name"], prefix)
+            alias_bases[alias] = alias_bases.get(alias, 0) + 1
+        for acct, names in planned:
+            alias = awsconfig.profile_name_for(acct["name"], prefix)
+            if alias == prefix or alias == base_for(acct):
+                continue  # no usable characters, or the short name is the account name
+            aliases = [(f"{alias}{suffix}", role) for role, suffix in roles]
+            if alias_bases[alias] > 1 or any(n in taken for n, _ in aliases):
+                log.warning("Not adding account-name profiles %s* for %s (%s): name shared or taken",
+                            alias, acct["name"], acct["id"])
+                continue
+            taken.update(n for n, _ in aliases)
+            names.extend(aliases)
+
+    sections = []
+    expected: dict[str, set[str]] = {}
+    for acct, names in planned:
+        comment = (f"# {_comment_text(acct['name'])} ({acct['id']}) | domain: {_comment_text(acct['domain'])} | "
+                   f"env: {acct['env'] or '-'}")
+        for name, role in names:
             expected[f"profile {name}"] = {"role_arn", "source_profile", "region", "output"}
             sections.append("\n".join([
                 comment,
@@ -300,6 +327,8 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
     settings["role_suffixes"] = role_suffixes(settings["roles"], org["role_suffixes"])
     if not isinstance(org["require_short_name"], bool):
         raise ValueError("require_short_name must be true or false")
+    if not isinstance(org["account_name_aliases"], bool):
+        raise ValueError("account_name_aliases must be true or false")
     return settings
 
 

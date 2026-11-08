@@ -79,6 +79,33 @@ def test_merge_derives_short_name_domain_env():
 USER_SUFFIXES = {"ReadOnly": "-ro", "Account-Admin": "-adm", "Platform-Admin": ""}
 
 
+def test_build_role_block_account_name_aliases():
+    org = {"exclude_accounts": [], "profile_prefix": "bm-", "source_profile": "bm-src",
+           "account_name_aliases": True}
+    accounts = [
+        {"id": "111111111111", "name": "Operations", "shortName": "ops", "domain": "Core", "env": "Prd"},
+        {"id": "222222222222", "name": "sbx", "shortName": "sbx", "domain": "Sandbox", "env": "Sbx"},
+        {"id": "333333333333", "name": "Ops", "shortName": "tools", "domain": "Core", "env": "Prd"},
+        {"id": "444444444444", "name": "Taken", "shortName": "tkn", "domain": "Core", "env": "Prd"},
+    ]
+    roles = sync_profiles.role_suffixes(["Platform-Admin", "ReadOnly"], USER_SUFFIXES)
+    block = sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                           roles, "aws", reserved={"bm-taken-ro"})
+    names = configparser.RawConfigParser()
+    names.read_string(block)
+    assert names.sections() == [
+        "profile bm-ops", "profile bm-ops-ro", "profile bm-operations", "profile bm-operations-ro",
+        "profile bm-sbx", "profile bm-sbx-ro",   # short name == account name: no alias
+        "profile bm-tkn", "profile bm-tkn-ro",   # alias would take a hand-written name: skipped
+        "profile bm-tools", "profile bm-tools-ro",  # alias "bm-ops" is a short name: short names win
+    ]
+    assert names["profile bm-operations-ro"]["role_arn"] == "arn:aws:iam::111111111111:role/ReadOnly"
+    org["account_name_aliases"] = False
+    plain = sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                           roles, "aws", reserved=set())
+    assert "bm-operations" not in plain
+
+
 def test_role_suffixes_mapping_default_and_errors():
     roles = ["Platform-Admin", "ReadOnly", "Account-Admin", "Billing Viewer"]
     assert sync_profiles.role_suffixes(roles, USER_SUFFIXES) == [
@@ -377,6 +404,7 @@ def test_sync_assume_role_config_errors(isolated_aws, caplog):
     (isolated_aws / "config").write_text(CORP_CONFIG)
     for cfg, message in ((_role_cfg(ddb_table_arn=1), "ddb_table_arn must be a string"),
                          (_role_cfg(include_inactive="yes"), "include_inactive must be true or false"),
+                         (_role_cfg(account_name_aliases="yes"), "account_name_aliases must be true or false"),
                          (_role_cfg(env_file="x.env"), "env_file was removed"),
                          (_role_cfg(source_profile="undefined"), "undefined")):
         caplog.clear()
