@@ -1,0 +1,87 @@
+# aws-cli-toolbox configuration.
+# Default location: ~/.aws/toolbox.toml (override with AWS_TOOLBOX_CONFIG).
+# Generate a starter copy with: aws-toolbox init
+
+[defaults]
+region = "us-east-1"
+output = "json"
+
+[sso]
+# The org (an [orgs.<name>] table below) whose portal logs in first; its logins
+# open the browser automatically. Every other start URL gets the URL printed
+# for manual use (e.g. in an alternate browser profile/container).
+main_org = ""
+# Used instead when main_org is empty: a profile whose start URL is the main one.
+main_profile = "main-org"
+# Skip login when the cached token is valid for at least this many minutes.
+min_remaining_minutes = 30
+
+[assume_role]
+session_name = ""          # empty = local username
+duration_seconds = 3600
+
+# Single-org setup. With [orgs.<name>] tables (below), [sync] only supplies
+# readonly_role, admin_role and admin_suffix as defaults for every org.
+[sync]
+# Profile with organizations:ListAccounts in the management account.
+management_profile = "main-org"
+# Generated profiles reference this [sso-session] section, which you manage
+# yourself in ~/.aws/config. Leave empty to write sso_start_url/sso_region
+# into every generated profile instead.
+sso_session = ""
+sso_start_url = ""        # e.g. "https://my-org.awsapps.com/start"
+sso_region = "us-east-1"
+readonly_role = "ReadOnlyAccess"
+admin_role = "AdministratorAccess"
+admin_suffix = "-adm"
+profile_prefix = ""
+# Account IDs to leave out of generated profiles.
+exclude_accounts = []
+
+# Multiple organizations: one table per org. Each org's profiles go in their
+# own managed block in ~/.aws/config. management_profile and exactly one of
+# sso_session or sso_start_url + sso_region are required per org and never
+# inherited, so one org's profiles can't end up pointing at another org's
+# portal. The management profile must sign in at the org's own portal (an SSO
+# profile, or a role chained from one). Give each org its own profile_prefix.
+#
+# [orgs.acme]
+# sso_session = "acme"
+# management_profile = "acme-mgmt-ro"
+# profile_prefix = "acme-"
+#
+# [orgs.globex]
+# sso_session = "globex"
+# management_profile = "globex-mgmt-ro"
+# profile_prefix = "globex-"
+# readonly_role = "ViewOnlyAccess"   # any [sync] key may be overridden per org
+#
+# Assume-role mode: set source_profile on an org. Accounts then come from the
+# org's OU tree, short names / business domains / environments from the
+# account-mapping DynamoDB table, and each account gets one profile per role,
+# `<prefix><short name>-<role>`, with role_arn + source_profile instead of SSO.
+# Table and roles are read from env_file using the same BM_* keys as the
+# switch-role bookmarks generator (BM_DDB_TABLE_ARN, BM_DDB_PROFILE,
+# BM_DDB_ROLE_NAME, BM_ATTR_*, BM_DEFAULT_ROLES, BM_INCLUDE_INACTIVE).
+#
+# [orgs.acme]
+# sso_session = "acme"
+# management_profile = "acme-bil-ro"     # reads Organizations
+# source_profile = "acme-bil-cpa"        # every generated profile chains from this
+# env_file = "~/path/to/shared.env"
+# profile_prefix = "acme-"
+# roles = []                               # [] = BM_DEFAULT_ROLES
+#
+# Role list and profile-name suffixes for assume-role orgs. Set them in [sync]
+# to share them across orgs, or per org to override. "" = no suffix; an
+# unmapped role gets "-<role name>".
+# [sync]
+# roles = ["Platform-Admin", "ReadOnly", "Account-Admin"]
+# role_suffixes = { "Platform-Admin" = "", "ReadOnly" = "-ro", "Account-Admin" = "-adm" }
+
+[netskope]
+bundle_path = "~/.aws/ca-bundle.pem"
+# Extra certs/dirs to search; built-in macOS/Linux agent paths are always tried.
+search_paths = []
+# Prepend the system/botocore CA bundle so non-intercepted traffic still verifies.
+include_base_bundle = true

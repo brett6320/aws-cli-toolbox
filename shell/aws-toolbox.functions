@@ -1,0 +1,141 @@
+# aws-cli-toolbox shell integration (bash/zsh). Installed by ./install.sh to
+#   ~/.functions.d/aws-toolbox.functions (sourced by the shell rc loop).
+#
+# Functions that must change the calling shell's environment live here; the
+# rest of the toolbox is console scripts on PATH. Names this file supersedes
+# in older *.functions files are listed in shell/replaces.txt.
+
+# aws-assume-role ROLE [ACCOUNT_ID] [--profile P] [--duration S] [--session-name N]
+aws-assume-role() {
+  local out arg
+  for arg in "$@"; do
+    case "$arg" in
+      --format|--format=*) echo "aws-assume-role: --format is fixed to sh; use 'aws-toolbox assume-role' directly" >&2; return 2 ;;
+    esac
+  done
+  out="$(aws-toolbox assume-role "$@" --format sh)" || return $?
+  case "$out" in
+    usage:*) printf '%s\n' "$out"; return 0 ;;
+  esac
+  eval "$out"
+}
+
+# Drop credentials and profile selection from the environment.
+aws-clear-identity() {
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN \
+        AWS_CREDENTIAL_EXPIRATION AWS_PROFILE
+}
+
+# Former name of aws-sts-decode.
+aws-sts-decode-message() {
+  aws-sts-decode "$@"
+}
+
+# Point the AWS CLI at the Netskope bundle when one has been built.
+if [ -z "${AWS_CA_BUNDLE:-}" ] && [ -f "${HOME}/.aws/ca-bundle.pem" ]; then
+  export AWS_CA_BUNDLE="${HOME}/.aws/ca-bundle.pem"
+fi
+
+# zsh-only helpers below (ported from aws-shell.functions).
+[ -n "${ZSH_VERSION:-}" ] || return 0
+
+# switch AWS_PROFILE (fzf picker if no arg); sso-logs-in if creds expired
+aws-profile() {
+  emulate -L zsh
+  local login=1 p
+  while [[ $1 == -* ]]; do
+    case "$1" in
+      -n|--no-login) login=0; shift ;;
+      -h|--help)
+        print "usage: aws-profile [-n|--no-login] [profile]"
+        print "  sets AWS_PROFILE, clearing any static creds in the env"
+        print "  no profile given: pick one interactively"
+        print "  -n  don't run 'aws sso login' when credentials are expired"
+        return 0 ;;
+      *) print -u2 "aws-profile: unknown arg: $1"; return 2 ;;
+    esac
+  done
+
+  local -a profiles
+  profiles=(${(f)"$(aws configure list-profiles 2>/dev/null)"})
+  (( ${#profiles} )) || { print -u2 "aws-profile: no profiles found"; return 1 }
+
+  p=$1
+  if [[ -z $p ]]; then
+    if (( $+commands[fzf] )); then
+      local cfg=${AWS_CONFIG_FILE:-$HOME/.aws/config}
+      cfg=${cfg/#\~/$HOME}
+      p=$(print -l $profiles | fzf --height=40% --reverse --prompt='aws profile> ' \
+        --header="current: ${AWS_PROFILE:-<none>}" \
+        --preview="awk -v p={} '\$0==\"[profile \" p \"]\" || (p==\"default\" && \$0==\"[default]\") {f=1; print; next} /^\\[/ {f=0} f' ${(q)cfg}")
+    else
+      local PS3="aws profile> "
+      select p in $profiles; do [[ -n $p ]] && break; done
+    fi
+    [[ -n $p ]] || return 1
+  fi
+
+  if (( ! ${profiles[(Ie)$p]} )); then
+    print -u2 "aws-profile: no such profile: $p"
+    return 1
+  fi
+
+  # static keys in the env take precedence over AWS_PROFILE, so drop them
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN \
+        AWS_CREDENTIAL_EXPIRATION AWS_DEFAULT_PROFILE
+  export AWS_PROFILE=$p
+
+  local ident
+  if ! ident=$(aws sts get-caller-identity --output json 2>/dev/null); then
+    # follow source_profile chain to the profile that holds the sso config
+    local root=$p src i
+    for i in {1..5}; do
+      src=$(aws configure get source_profile --profile "$root" 2>/dev/null)
+      [[ -n $src && $src != $root ]] || break
+      root=$src
+    done
+    local sess=$(aws configure get sso_session --profile "$root" 2>/dev/null)
+    if (( ! login )); then
+      print -u2 "aws-profile: $p set, but credentials are invalid/expired"
+      return 1
+    elif [[ -n $sess ]]; then
+      aws sso login --sso-session "$sess" || return 1
+    elif [[ -n $(aws configure get sso_start_url --profile "$root" 2>/dev/null) ]]; then
+      aws sso login --profile "$root" || return 1
+    else
+      print -u2 "aws-profile: $p set, but credentials are invalid (not an sso profile)"
+      return 1
+    fi
+    ident=$(aws sts get-caller-identity --output json) || return 1
+  fi
+
+  _aws_print_identity "$ident"
+}
+
+# show active profile, account, caller arn, region
+aws-whoami() {
+  emulate -L zsh
+  local ident
+  ident=$(aws sts get-caller-identity --output json) || return 1
+  _aws_print_identity "$ident"
+}
+
+# helper: pretty-print sts get-caller-identity json plus profile/region
+_aws_print_identity() {
+  emulate -L zsh
+  local region=${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null)}}
+  print "profile: ${AWS_PROFILE:-<none>}"
+  print "account: $(jq -r '.Account' <<< "$1")"
+  print "arn:     $(jq -r '.Arn' <<< "$1")"
+  print "region:  ${region:-<unset>}"
+}
+
+# tab-complete profile names for aws-profile
+_aws_profile_complete() {
+  local -a p
+  p=(${(f)"$(aws configure list-profiles 2>/dev/null)"})
+  compadd -a p
+}
+if (( $+functions[compdef] )); then
+  compdef _aws_profile_complete aws-profile
+fi
