@@ -40,6 +40,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # true: only accounts with a short name in the table get profiles
         # (no fallback to the account name).
         "require_short_name": False,
+        # Per-role source profile, e.g. { "Admin" = "acme-billing-adm" }; roles
+        # not listed chain from source_profile. Per org, never inherited.
+        "role_source_profiles": {},
     },
     "netskope": {
         "bundle_path": "~/.aws/ca-bundle.pem",

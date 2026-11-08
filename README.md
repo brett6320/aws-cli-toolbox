@@ -175,14 +175,16 @@ profile_prefix = "acme-"
   For an account with short name `prd` this gives `acme-prd`, `acme-prd-ro`
   and `acme-prd-adm`.
 - **Only accounts with a short name:** set `require_short_name = true` (in
-  `[sync]` or per org) to skip accounts whose `accountShortCode` is empty or that
-  have no table row, instead of naming them after the account.
-- **No table access yet (bootstrap):** if the table can't be read and the org has
-  no generated profiles yet, profiles are named after the accounts instead, and
-  `require_short_name` is ignored for that run. On the next run, if the
-  configured access still fails, the table is read through the org's own
-  generated profile for the table's account, using the first role in `roles`
-  that has one. That run replaces the account-name profiles with short-name
+  `[sync]` or per org; assume-role orgs only) to skip accounts whose short-name
+  attribute (default `accountShortCode`) is empty or that have no table row,
+  instead of naming them after the account. The table's own account is always
+  kept, because later runs may need its profiles to read the table.
+- **No table access yet (bootstrap):** if the table can't be read because of
+  missing access, and the org has no managed block yet, profiles are named after
+  the accounts instead, and `require_short_name` is ignored for that run. On the
+  next run, if the configured access still fails, the table is read through the
+  org's own generated profiles for the table's account, trying each role in
+  `roles` order. That run replaces the account-name profiles with short-name
   ones. So with no other access to the table:
 
   ```bash
@@ -191,9 +193,13 @@ profile_prefix = "acme-"
   aws-sync-profiles --org acme --execute
   ```
 
-  Once an org has generated profiles, an unreadable table leaves them unchanged
-  and the run exits 1. A temporary access problem never renames them. `--force`
-  rebuilds them with account names.
+  Only access errors (access denied, missing credentials or profile, expired
+  SSO login) trigger this. A wrong-account credential, a missing table or a
+  network error stops the org with exit 1. Once the org has a managed block, an
+  unreadable table leaves it unchanged and the run exits 1, so a temporary
+  access problem never renames profiles. `--force` rebuilds them with account
+  names. Excluding the table's account (`exclude_accounts`), or giving it
+  duplicate table rows, removes the profiles that later runs fall back to.
 - **Precedence:** command-line flags (`--ddb-table-arn`, `--ddb-profile`,
   `--ddb-role-name`, `--attr-*`, `--roles`, `--include-inactive`, `--profile`),
   then the org's `toolbox.toml` keys, then environment variables, then
@@ -201,6 +207,17 @@ profile_prefix = "acme-"
   `--org NAME`. A relative `env_file` is resolved against `toolbox.toml`'s directory.
 - `source_profile` must be defined by hand outside the managed block and sign in
   at the org's portal. Each role in the list must trust it.
+- **A different source per role:** `role_source_profiles` (per org) chains the
+  listed roles from another hand-written profile. For example, admin profiles
+  can come from an admin SSO profile while the rest use `source_profile`:
+
+  ```toml
+  [orgs.acme]
+  source_profile = "acme-billing-cpa"
+  role_source_profiles = { "Account-Admin" = "acme-billing-adm" }
+  ```
+
+  Each of these profiles has the same requirements as `source_profile`.
 
 **Moving from `[sync]` to `[orgs.*]`:** if `aws-sync-profiles` has already
 written profiles from `[sync]`, it refuses to run until you delete that older,
