@@ -320,3 +320,30 @@ def test_fetch_org_inactive_filter(include):
     org.close_account(AccountId=acct)
     ids = set(account_meta.fetch_org(org, include)["accounts"])
     assert (acct in ids) is include
+
+
+@mock_aws
+def test_require_short_name_skips_accounts_without_one(isolated_aws, tmp_path):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    ids = {n: org.create_account(AccountName=n, Email=f"{n}@example.com")["CreateAccountStatus"]["AccountId"]
+           for n in ("Sandbox", "Network", "Unnamed", "NoRow")}
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, (name, short) in enumerate((("Sandbox", "sbx"), ("Network", "net"), ("Unnamed", " "))):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": ids[name]}, "accountShortCode": {"S": short}})
+    env_file = tmp_path / "bm.env"
+    env_file.write_text(f"BM_DDB_TABLE_ARN={TABLE_ARN}\nBM_DEFAULT_ROLES=ReadOnly,Account-Admin\n")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(env_file, require_short_name=True,
+                    role_suffixes={"ReadOnly": "-ro", "Account-Admin": "-adm"})
+    assert sync_profiles.run(_args(execute=True), cfg) == 0
+    parser = configparser.RawConfigParser()
+    parser.read(path)
+    generated = sorted(s for s in parser.sections() if s.startswith("profile corp-") and s != "profile corp-src")
+    assert generated == ["profile corp-net-adm", "profile corp-net-ro", "profile corp-sbx-adm", "profile corp-sbx-ro"]
+    assert parser["profile corp-sbx-adm"]["role_arn"] == f"arn:aws:iam::{ids['Sandbox']}:role/Account-Admin"

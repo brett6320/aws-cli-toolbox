@@ -174,6 +174,9 @@ profile_prefix = "acme-"
 
   For an account with short name `prd` this gives `acme-prd`, `acme-prd-ro`
   and `acme-prd-adm`.
+- **Only accounts with a short name:** set `require_short_name = true` (in
+  `[sync]` or per org) to skip accounts whose `accountShortCode` is empty or that
+  have no table row, instead of naming them after the account.
 - **Precedence:** command-line flags (`--ddb-table-arn`, `--ddb-profile`,
   `--ddb-role-name`, `--attr-*`, `--roles`, `--include-inactive`, `--profile`),
   then the org's `toolbox.toml` keys, then environment variables, then

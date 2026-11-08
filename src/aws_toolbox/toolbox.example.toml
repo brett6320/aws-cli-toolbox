@@ -78,6 +78,7 @@ exclude_accounts = []
 # [sync]
 # roles = ["Platform-Admin", "ReadOnly", "Account-Admin"]
 # role_suffixes = { "Platform-Admin" = "", "ReadOnly" = "-ro", "Account-Admin" = "-adm" }
+# require_short_name = true   # skip accounts without a short name in the table
 
 [netskope]
 bundle_path = "~/.aws/ca-bundle.pem"

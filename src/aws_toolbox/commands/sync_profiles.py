@@ -310,6 +310,11 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
         log.error("%s: no account matched a row in %s; check BM_DDB_TABLE_ARN and BM_ATTR_* "
                   "(use --force to generate names from account names)", _label(name), s["ddb_table"])
         return None
+    if org["require_short_name"]:
+        named = [a for a in accounts if str(meta.get(a["id"], {}).get("shortName") or "").strip()]
+        log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
+                 _label(name), len(named), len(accounts))
+        accounts = named
     block = build_role_block(accounts, org, cfg["defaults"], s["role_suffixes"], partition,
                              awsconfig.reserved_profile_names(text, name))
     if not block and not args.force:

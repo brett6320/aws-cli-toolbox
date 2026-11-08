@@ -37,6 +37,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "env_file": "",
         "roles": [],
         "role_suffixes": {},
+        # true: only accounts with a short name in the table get profiles
+        # (no fallback to the account name).
+        "require_short_name": False,
     },
     "netskope": {
         "bundle_path": "~/.aws/ca-bundle.pem",
@@ -50,7 +53,8 @@ ORG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # [sync] keys every [orgs.<name>] inherits. Identity keys (portal, management
 # profile, prefix, exclusions) are never inherited, so a missing per-org value
 # can't point one org's profiles at another org's portal.
-INHERITED_SYNC_KEYS = ("readonly_role", "admin_role", "admin_suffix", "roles", "role_suffixes")
+INHERITED_SYNC_KEYS = ("readonly_role", "admin_role", "admin_suffix", "roles", "role_suffixes",
+                       "require_short_name")
 
 
 def aws_dir() -> Path:
