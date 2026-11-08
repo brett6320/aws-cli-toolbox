@@ -163,6 +163,13 @@ def _find_block(lines: list[str], org: str) -> tuple[int, int] | None:
     return starts[0], ends[0]
 
 
+def managed_block(text: str, org: str = "") -> str:
+    """The org's managed block contents (between the markers), or "" if there is none."""
+    lines = text.splitlines(keepends=True)
+    span = _find_block(lines, org)
+    return "".join(lines[span[0] + 1:span[1]]) if span else ""
+
+
 def has_managed_block(text: str, org: str = "") -> bool:
     return _find_block(text.splitlines(keepends=True), org) is not None
 

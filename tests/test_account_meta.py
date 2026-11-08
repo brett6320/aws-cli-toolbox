@@ -201,15 +201,53 @@ def test_sync_assume_role_mode_end_to_end(isolated_aws, tmp_path, capsys):
 
 
 @mock_aws
-def test_sync_assume_role_refuses_table_in_another_account(isolated_aws, tmp_path):
-    boto3.client("organizations", region_name="us-east-1").create_organization(FeatureSet="ALL")
+def test_sync_unreadable_table_bootstraps_then_keeps_profiles(isolated_aws, tmp_path):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    acct = org.create_account(AccountName="Ops Tools", Email="o@example.com")["CreateAccountStatus"]["AccountId"]
     env_file = tmp_path / "bm.env"
+    # credentials resolve to moto's account, not the table's: the read is refused
     env_file.write_text("BM_DDB_TABLE_ARN=arn:aws:dynamodb:us-east-1:999999999999:table/account-mapping\n"
-                        "BM_DDB_PROFILE=corp-src\n")
-    (isolated_aws / "config").write_text(CORP_CONFIG)
+                        "BM_DDB_PROFILE=corp-src\nBM_DEFAULT_ROLES=ReadOnly\n")
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(env_file, require_short_name=True)  # ignored while the table is unreadable
     with mock.patch.object(account_meta, "get_session", return_value=boto3.Session(region_name="us-east-1")):
-        assert sync_profiles.run(_args(execute=True), _role_cfg(env_file)) == 1
-    assert "managed profiles" not in (isolated_aws / "config").read_text()
+        assert sync_profiles.run(_args(execute=True), cfg) == 0  # run 1: names from accounts
+        text = path.read_text()
+        assert "[profile corp-ops-tools-readonly]" in text
+        assert f"role/ReadOnly" in text and acct in text
+        # a later run that still can't read the table leaves the profiles alone
+        assert sync_profiles.run(_args(execute=True), cfg) == 1
+        assert path.read_text() == text
+
+
+def test_read_table_falls_back_to_generated_profile(isolated_aws):
+    from aws_toolbox import awsconfig
+    text = awsconfig.replace_managed_block(CORP_CONFIG, (
+        "[profile corp-ops-readonly]\nrole_arn = arn:aws:iam::123456789012:role/ReadOnly\nsource_profile = corp-src\n\n"
+        "[profile corp-ops]\nrole_arn = arn:aws:iam::123456789012:role/Platform-Admin\nsource_profile = corp-src\n\n"
+        "[profile corp-other]\nrole_arn = arn:aws:iam::222222222222:role/Platform-Admin\nsource_profile = corp-src"))
+    roles = ["Platform-Admin", "ReadOnly"]
+    assert sync_profiles.generated_profile_for(text, "", "123456789012", roles) == "corp-ops"
+    assert sync_profiles.generated_profile_for(text, "", "123456789012", ["ReadOnly"]) == "corp-ops-readonly"
+    assert sync_profiles.generated_profile_for(text, "", "333333333333", roles) is None
+
+    from botocore.exceptions import ClientError
+    denied = ClientError({"Error": {"Code": "ForbiddenException", "Message": "No access"}}, "GetRoleCredentials")
+    used = []
+
+    def ddb_session(settings, org_session):
+        used.append(settings["ddb_profile"])
+        if settings["ddb_profile"] != "corp-ops":
+            raise denied
+        return mock.Mock()
+    s = account_meta.resolve_settings({"ddb_table_arn": TABLE_ARN, "ddb_profile": "ops-adm", "roles": roles})
+    with mock.patch.object(account_meta, "get_ddb_session", side_effect=ddb_session), \
+         mock.patch.object(sync_profiles, "get_client"), \
+         mock.patch.object(account_meta, "fetch_metadata", return_value=({"1": {}}, set())):
+        assert sync_profiles.read_table("", s, None, text) == ({"1": {}}, set())
+    assert used == ["ops-adm", "corp-ops"]
 
 
 def test_sync_assume_role_config_errors(isolated_aws, tmp_path):

@@ -177,6 +177,23 @@ profile_prefix = "acme-"
 - **Only accounts with a short name:** set `require_short_name = true` (in
   `[sync]` or per org) to skip accounts whose `accountShortCode` is empty or that
   have no table row, instead of naming them after the account.
+- **No table access yet (bootstrap):** if the table can't be read and the org has
+  no generated profiles yet, profiles are named after the accounts instead, and
+  `require_short_name` is ignored for that run. On the next run, if the
+  configured access still fails, the table is read through the org's own
+  generated profile for the table's account, using the first role in `roles`
+  that has one. That run replaces the account-name profiles with short-name
+  ones. So with no other access to the table:
+
+  ```bash
+  aws-sync-profiles --org acme --execute   # run 1: account names, incl. the table's account
+  aws-sync-profiles --org acme             # run 2 (dry run): short names via that profile
+  aws-sync-profiles --org acme --execute
+  ```
+
+  Once an org has generated profiles, an unreadable table leaves them unchanged
+  and the run exits 1. A temporary access problem never renames them. `--force`
+  rebuilds them with account names.
 - **Precedence:** command-line flags (`--ddb-table-arn`, `--ddb-profile`,
   `--ddb-role-name`, `--attr-*`, `--roles`, `--include-inactive`, `--profile`),
   then the org's `toolbox.toml` keys, then environment variables, then

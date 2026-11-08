@@ -30,7 +30,15 @@ GIT_ENV = {
 def env(tmp_path):
     """Throwaway git repo (copy of this one, committed on main) + install dirs."""
     repo = tmp_path / "repo"
-    shutil.copytree(REPO, repo, ignore=shutil.ignore_patterns(".venv", ".pytest_cache", "__pycache__", ".git"))
+    # Only files git tracks or would track: never ignored local files (e.g. a
+    # symlinked personal toolbox.toml) or the venv.
+    files = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           check=True, capture_output=True, text=True).stdout.split("\0")
+    for rel in filter(None, files):
+        src = REPO / rel
+        if src.is_file():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, repo / rel)
     e = {**os.environ, **GIT_ENV, "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "TMPDIR": str(tmp_path),
          "FUNCTIONS_DIR": str(tmp_path / "fd"), "XDG_STATE_HOME": str(tmp_path / "state"),
          "AWS_TOOLBOX_SKIP_UV": "1", "AWS_TOOLBOX_CONFIG": str(tmp_path / "toolbox.toml")}

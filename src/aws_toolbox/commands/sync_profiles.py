@@ -279,6 +279,48 @@ def meta_settings(org: dict, args: argparse.Namespace) -> dict:
     return settings
 
 
+def generated_profile_for(text: str, org: str, account_id: str, roles: list[str]) -> str | None:
+    """This org's generated profile for `account_id`, preferring roles in `roles` order."""
+    parser = awsconfig.read_text(awsconfig.managed_block(text, org))
+    by_role = {}
+    for section in parser.sections():
+        arn = parser[section].get("role_arn", "")
+        m = re.match(r"^arn:[^:]+:iam::(\d{12}):role/(.+)$", arn)
+        if m and m.group(1) == account_id and section.startswith("profile "):
+            by_role.setdefault(m.group(2), section[len("profile "):])
+    return next((by_role[r] for r in roles if r in by_role), None)
+
+
+def read_table(name: str, s: dict, org_session, text: str) -> tuple[dict, set[str]] | None:
+    """Scan the metadata table, or None if no credentials can read it.
+
+    Tries the configured access (BM_DDB_PROFILE, the org profile, or
+    BM_DDB_ROLE_NAME), then this org's own generated profile for the table's
+    account. That second path is how a first run without table access is
+    backfilled: run 1 generates the profiles, run 2 reads the table with them.
+    """
+    attempts = [("configured access", s)]
+    fallback = generated_profile_for(text, name, s["ddb_account_id"], s["roles"])
+    if fallback and fallback != s["ddb_profile"]:
+        attempts.append((f"generated profile {fallback}", {**s, "ddb_profile": fallback}))
+    attrs = {"account_id": s["attr_account_id"], "short_name": s["attr_short_name"],
+             "ou": s["attr_ou"], "environment": s["attr_environment"]}
+    for how, settings in attempts:
+        try:
+            session = account_meta.get_ddb_session(settings, org_session)
+            meta, dupes = account_meta.fetch_metadata(
+                get_client("dynamodb", session, s["ddb_region"]), s["ddb_table"], attrs)
+        except ClientError as e:
+            log.warning("%s: can't read %s with %s: %s %s", _label(name), s["ddb_table"], how,
+                        e.response["Error"]["Code"], e.response["Error"]["Message"])
+        except (BotoCoreError, RuntimeError) as e:
+            log.warning("%s: can't read %s with %s: %s", _label(name), s["ddb_table"], how, e)
+        else:
+            log.info("%s: read %s with %s", _label(name), s["ddb_table"], how)
+            return meta, dupes
+    return None
+
+
 def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argparse.Namespace,
                    cfg: dict) -> str | None:
     """Assume-role mode: org tree + metadata table -> role_arn profiles."""
@@ -287,13 +329,6 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     try:
         org_session = account_meta.get_session(s["profile"], s["region"])
         tree = account_meta.fetch_org(get_client("organizations", org_session), s["include_inactive"])
-        ddb_session = account_meta.get_ddb_session(s, org_session)
-        meta, dupes = account_meta.fetch_metadata(
-            get_client("dynamodb", ddb_session, s["ddb_region"]),
-            s["ddb_table"],
-            {"account_id": s["attr_account_id"], "short_name": s["attr_short_name"],
-             "ou": s["attr_ou"], "environment": s["attr_environment"]},
-        )
         partition = org_session.get_partition_for_region(s["region"])
     except ClientError as e:
         log.error("%s: AWS error %s: %s", _label(name), e.response["Error"]["Code"],
@@ -302,19 +337,34 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     except (BotoCoreError, RuntimeError) as e:
         log.error("%s: %s", _label(name), e)
         return None
+
+    table = read_table(name, s, org_session, text)
+    if table is None:
+        if awsconfig.has_managed_block(text, name) and not args.force:
+            # A temporary access problem must not rename every existing profile.
+            log.error("%s: can't read the metadata table; leaving existing profiles as they are "
+                      "(use --force to rebuild them with account names)", _label(name))
+            return None
+        log.warning("%s: can't read the metadata table; naming profiles after their accounts. "
+                    "Run again once a generated profile for account %s can read it, to switch "
+                    "to short names.", _label(name), s["ddb_account_id"])
+        meta, dupes = {}, set()
+    else:
+        meta, dupes = table
     tree = {**tree, "accounts": {k: v for k, v in tree["accounts"].items() if k not in dupes}}
     accounts = account_meta.merge(tree, meta)
-    matched = sum(1 for a in accounts if a["hasMetadata"])
-    if accounts and not matched and not args.force:
-        # Wrong table/BM_ATTR_* names would otherwise rename every profile.
-        log.error("%s: no account matched a row in %s; check BM_DDB_TABLE_ARN and BM_ATTR_* "
-                  "(use --force to generate names from account names)", _label(name), s["ddb_table"])
-        return None
-    if org["require_short_name"]:
-        named = [a for a in accounts if str(meta.get(a["id"], {}).get("shortName") or "").strip()]
-        log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
-                 _label(name), len(named), len(accounts))
-        accounts = named
+    if table is not None:
+        matched = sum(1 for a in accounts if a["hasMetadata"])
+        if accounts and not matched and not args.force:
+            # Wrong table/BM_ATTR_* names would otherwise rename every profile.
+            log.error("%s: no account matched a row in %s; check BM_DDB_TABLE_ARN and BM_ATTR_* "
+                      "(use --force to generate names from account names)", _label(name), s["ddb_table"])
+            return None
+        if org["require_short_name"]:
+            named = [a for a in accounts if str(meta.get(a["id"], {}).get("shortName") or "").strip()]
+            log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
+                     _label(name), len(named), len(accounts))
+            accounts = named
     block = build_role_block(accounts, org, cfg["defaults"], s["role_suffixes"], partition,
                              awsconfig.reserved_profile_names(text, name))
     if not block and not args.force:
