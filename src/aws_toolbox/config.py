@@ -49,6 +49,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # true: only accounts with a short name in the table get profiles
         # (no fallback to the account name).
         "require_short_name": False,
+        # true: accounts with a short name also get profiles named after the
+        # account (e.g. acme-ops and acme-operations). Short names win clashes.
+        "account_name_aliases": False,
         # Per-role source profile, e.g. { "Admin" = "acme-billing-adm" }; roles
         # not listed chain from source_profile. Per org, never inherited.
         "role_source_profiles": {},
@@ -66,7 +69,7 @@ ORG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # profile, prefix, exclusions) are never inherited, so a missing per-org value
 # can't point one org's profiles at another org's portal.
 INHERITED_SYNC_KEYS = ("readonly_role", "admin_role", "admin_suffix", "roles", "role_suffixes",
-                       "require_short_name", "ddb_role_name", "attr_account_id", "attr_short_name",
+                       "require_short_name", "account_name_aliases", "ddb_role_name", "attr_account_id", "attr_short_name",
                        "attr_ou", "attr_environment", "include_inactive")
 
 

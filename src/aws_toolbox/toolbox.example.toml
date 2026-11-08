@@ -84,6 +84,7 @@ exclude_accounts = []
 # roles = ["ReadOnly", "Read-Only-Plus", "Platform-Admin", "Account-Admin"]
 # role_suffixes = { "ReadOnly" = "-ro", "Read-Only-Plus" = "-rop", "Platform-Admin" = "", "Account-Admin" = "-adm" }
 # require_short_name = true   # skip accounts without a short name in the table
+# account_name_aliases = true # also write profiles under the account name (acme-ops + acme-operations)
 # Shared table settings ([sync] or per org):
 # ddb_role_name = "OrganizationAccountAccessRole"   # assumed in the table's account
 # attr_account_id = "accountNumber"

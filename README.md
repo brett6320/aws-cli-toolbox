@@ -305,6 +305,13 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
   attribute (default `accountShortCode`) is empty or that have no table row,
   instead of naming them after the account. The table's own account is always
   kept, because later runs may need its profiles to read the table.
+- **Long and short names:** set `account_name_aliases = true` (in `[sync]` or
+  per org) to also write each account's profiles under its account name, so
+  `acme-ops-ro` and `acme-operations-ro` both work. This only applies to
+  accounts whose short name differs from the account name. Short names win:
+  an account-name alias that would clash with a short name, another alias or
+  a hand-written profile is skipped with a warning. During the bootstrap run
+  below, the account names are the only names.
 - **No table access yet (bootstrap):** if the table can't be read because of
   missing access, and the org has no managed block yet, profiles are named after
   the accounts instead, and `require_short_name` is ignored for that run. On the
