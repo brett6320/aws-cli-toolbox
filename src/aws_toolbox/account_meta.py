@@ -1,0 +1,303 @@
+"""Account list and metadata, shared with the switch-role bookmarks generator.
+
+Ported from its aws_bookmarks.py (sha256 0b78c68a3789…),
+which isn't an installable package. Keep the two in step: same .env keys, same
+defaults, same normalization. Deliberate differences, all marked "differs:":
+  - read_dotenv returns a dict instead of filling os.environ, so two orgs can
+    use different .env files in one run;
+  - resolve_settings takes that dict and only the settings sync uses;
+  - fetch_metadata reports account IDs with more than one row so the caller
+    can skip them (the generator uses the last row);
+  - resolve_settings can report environment variables that hide a different
+    env_file value (env_overrides);
+  - clients come from aws_toolbox.session (3 adaptive retries, not 8), and the
+    assumed-role session name is "aws-cli-toolbox".
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+import boto3
+from boto3.dynamodb.types import TypeDeserializer
+from botocore.exceptions import ClientError
+
+from aws_toolbox.session import get_client
+
+log = logging.getLogger(__name__)
+
+ENVIRONMENTS = ("Lab", "Sbx", "Dev", "Tst", "Prd", "Bil")
+ENV_ALIASES = {
+    "lab": "Lab",
+    "sbx": "Sbx",
+    "sandbox": "Sbx",
+    "dev": "Dev",
+    "development": "Dev",
+    "tst": "Tst",
+    "test": "Tst",
+    "testing": "Tst",
+    "prd": "Prd",
+    "prod": "Prd",
+    "production": "Prd",
+    "bil": "Bil",
+    "billing": "Bil",
+}
+LEGACY_DOMAIN = "Legacy"
+INACTIVE_STATES = {"SUSPENDED", "PENDING_CLOSURE", "CLOSED"}
+
+TABLE_ARN_RE = re.compile(
+    r"^arn:(?P<partition>[^:]+):dynamodb:(?P<region>[^:]+):(?P<account>\d{12}):table/(?P<table>[^/]+)$"
+)
+
+# setting -> (env var, default); the subset of the generator's SETTINGS that sync uses
+SETTINGS = {
+    "profile": ("AWS_PROFILE", None),
+    "region": ("AWS_REGION", "us-east-1"),
+    "ddb_table_arn": ("BM_DDB_TABLE_ARN", None),
+    "ddb_profile": ("BM_DDB_PROFILE", None),
+    "ddb_role_name": ("BM_DDB_ROLE_NAME", "OrganizationAccountAccessRole"),
+    "attr_account_id": ("BM_ATTR_ACCOUNT_ID", "accountNumber"),
+    "attr_short_name": ("BM_ATTR_SHORT_NAME", "accountShortCode"),
+    "attr_ou": ("BM_ATTR_OU", "ou"),
+    "attr_environment": ("BM_ATTR_ENVIRONMENT", "environment"),
+    "roles": ("BM_DEFAULT_ROLES", "ReadOnly,Administrator"),
+    "include_inactive": ("BM_INCLUDE_INACTIVE", "false"),
+}
+
+
+def read_dotenv(path: Path | None) -> dict[str, str]:
+    """Minimal .env reader (KEY=VALUE lines). Missing file -> {}.
+
+    differs: returns the values instead of os.environ.setdefault-ing them.
+    """
+    out: dict[str, str] = {}
+    if path is None or not path.is_file():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        out.setdefault(key, value)
+    return out
+
+
+def get_session(profile: str | None, region: str) -> boto3.Session:
+    return boto3.Session(profile_name=profile, region_name=region)
+
+
+def env_overrides(dotenv: Mapping[str, str]) -> list[str]:
+    """Settings env vars that hide a different value from the env_file."""
+    return sorted(var for var, _ in SETTINGS.values()
+                  if var in dotenv and os.environ.get(var) not in (None, dotenv[var]))
+
+
+def resolve_settings(kwargs: Mapping[str, Any], dotenv: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """kwargs > environment > .env > defaults (existing env vars beat .env, as in the generator)."""
+    unknown = set(kwargs) - set(SETTINGS)
+    if unknown:
+        raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
+    environ = {**(dotenv or {}), **os.environ}
+    cfg: dict[str, Any] = {}
+    for key, (env_var, default) in SETTINGS.items():
+        value = kwargs.get(key)
+        if value is None:
+            value = environ.get(env_var) or default
+        cfg[key] = value
+    if isinstance(cfg["roles"], str):
+        cfg["roles"] = [r.strip() for r in cfg["roles"].split(",") if r.strip()]
+    if isinstance(cfg["include_inactive"], str):
+        cfg["include_inactive"] = cfg["include_inactive"].lower() in ("1", "true", "yes")
+    if not cfg["ddb_table_arn"]:
+        raise ValueError("ddb_table_arn is required (BM_DDB_TABLE_ARN in the org's env_file, or --ddb-table-arn)")
+    m = TABLE_ARN_RE.match(cfg["ddb_table_arn"].strip())
+    if not m:
+        raise ValueError(f"Not a DynamoDB table ARN: {cfg['ddb_table_arn']}")
+    cfg["ddb_table"], cfg["ddb_account_id"], cfg["ddb_region"] = m["table"], m["account"], m["region"]
+    return cfg
+
+
+def normalize_account_id(value: Any) -> str:
+    """DDB may store IDs as numbers, dropping leading zeros."""
+    text = str(value).strip()
+    if text.endswith(".0"):  # Decimal/float rendering
+        text = text[:-2]
+    return text.zfill(12)
+
+
+def normalize_env(value: Any) -> str | None:
+    if value is None:
+        return None
+    return ENV_ALIASES.get(str(value).strip().lower())
+
+
+def _paginate(client, op: str, key: str, **params) -> Iterable[dict]:
+    for page in client.get_paginator(op).paginate(**params):
+        yield from page.get(key, [])
+
+
+def fetch_org(org, include_inactive: bool = False) -> dict[str, Any]:
+    """Walk the org tree. Returns {"tree": node, "accounts": {id: info}}.
+
+    node = {"id", "name", "type": "ROOT"|"OU", "children": [node], "accounts": [id]};
+    the root node also has "orgId" (o-...), or None if it can't be read.
+    """
+    accounts: dict[str, dict[str, Any]] = {}
+    skipped = 0
+
+    def walk(parent_id: str, name: str, node_type: str, path: list[str]) -> dict[str, Any]:
+        nonlocal skipped
+        node = {"id": parent_id, "name": name, "type": node_type, "children": [], "accounts": []}
+        for acct in _paginate(org, "list_accounts_for_parent", "Accounts", ParentId=parent_id):
+            state = acct.get("State") or acct.get("Status")
+            if state in INACTIVE_STATES and not include_inactive:
+                skipped += 1
+                continue
+            accounts[acct["Id"]] = {
+                "id": acct["Id"],
+                "name": acct.get("Name", acct["Id"]),
+                "email": acct.get("Email", ""),
+                "state": state,
+                "orgPath": path,
+            }
+            node["accounts"].append(acct["Id"])
+        ous = list(_paginate(org, "list_organizational_units_for_parent", "OrganizationalUnits", ParentId=parent_id))
+        for ou in sorted(ous, key=lambda o: o["Name"].lower()):
+            log.debug("Walking OU %s (%s)", ou["Name"], ou["Id"])
+            node["children"].append(walk(ou["Id"], ou["Name"], "OU", path + [ou["Name"]]))
+        return node
+
+    roots = list(_paginate(org, "list_roots", "Roots"))
+    if not roots:
+        raise RuntimeError("No organization root found")
+    root = roots[0]
+    log.info("Reading org structure from root %s", root["Id"])
+    tree = walk(root["Id"], root.get("Name", "Root"), "ROOT", [])
+    # the root ARN embeds the org ID (arn:aws:organizations::<mgmt>:root/o-xxxx/r-xxxx), so no
+    # extra permission is needed; DescribeOrganization is only a fallback
+    m = re.search(r":root/(o-[a-z0-9]+)/", root.get("Arn", ""))
+    tree["orgId"] = m.group(1) if m else None
+    if not tree["orgId"]:
+        try:
+            tree["orgId"] = org.describe_organization()["Organization"]["Id"]
+        except ClientError as e:
+            log.warning("Can't read organization ID (%s); omitting it", e.response["Error"]["Code"])
+    log.info("Found %d accounts (%d inactive skipped)", len(accounts), skipped)
+    return {"tree": tree, "accounts": accounts}
+
+
+def _caller_account(session: boto3.Session) -> str:
+    return get_client("sts", session).get_caller_identity()["Account"]
+
+
+def get_ddb_session(cfg: Mapping[str, Any], org_session: boto3.Session) -> boto3.Session:
+    """Session in the table's account: ddb_profile, else the org session (same account) or an
+    assumed ddb_role_name. Refuses credentials for any other account."""
+    account = cfg["ddb_account_id"]
+    if cfg["ddb_profile"]:
+        log.debug("DDB via profile %s", cfg["ddb_profile"])
+        session = get_session(cfg["ddb_profile"], cfg["ddb_region"])
+    elif _caller_account(org_session) == account:
+        log.debug("DDB via the Organizations session")
+        session = org_session
+    else:
+        partition = org_session.get_partition_for_region(cfg["ddb_region"])
+        role_arn = f"arn:{partition}:iam::{account}:role/{cfg['ddb_role_name']}"
+        log.debug("DDB via assume-role %s", role_arn)
+        creds = get_client("sts", org_session).assume_role(
+            RoleArn=role_arn, RoleSessionName="aws-cli-toolbox"
+        )["Credentials"]
+        session = boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=cfg["ddb_region"],
+        )
+    actual = _caller_account(session)
+    if actual != account:
+        raise RuntimeError(f"DynamoDB credentials are for account {actual}, but the table is in {account}; "
+                           "fix --ddb-profile / BM_DDB_PROFILE")
+    return session
+
+
+def fetch_metadata(ddb, table: str, attrs: Mapping[str, str]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Scan the table (read-only) -> ({account_id: {shortName, ou, envRaw}}, duplicated IDs).
+
+    differs: an account ID on more than one row is left out of the mapping and
+    returned in the second value, instead of keeping the last row.
+    """
+    names = {f"#a{i}": a for i, a in enumerate(attrs.values())}
+    deser = TypeDeserializer()
+    out: dict[str, dict[str, Any]] = {}
+    dupes: set[str] = set()
+    log.info("Scanning DynamoDB table %s", table)
+    for item in _paginate(
+        ddb,
+        "scan",
+        "Items",
+        TableName=table,
+        ProjectionExpression=", ".join(names),
+        ExpressionAttributeNames=names,
+    ):
+        row = {k: deser.deserialize(v) for k, v in item.items()}
+        acct_id = row.get(attrs["account_id"])
+        if acct_id in (None, ""):
+            continue
+        acct_id = normalize_account_id(acct_id)
+        if acct_id in out or acct_id in dupes:
+            dupes.add(acct_id)
+            out.pop(acct_id, None)
+            continue
+        out[acct_id] = {
+            "shortName": row.get(attrs["short_name"]),
+            "ou": row.get(attrs["ou"]),
+            "envRaw": row.get(attrs["environment"]),
+        }
+    for acct_id in sorted(dupes):
+        log.warning("Account %s appears in more than one table row; skipping it", acct_id)
+    log.info("Loaded metadata for %d accounts", len(out))
+    return out, dupes
+
+
+def _blank(value: Any) -> bool:
+    return value is None or not str(value).strip()
+
+
+def merge(org: Mapping[str, Any], meta: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Org accounts enriched with shortName, domain and env, sorted by shortName."""
+    merged = []
+    for acct_id, info in org["accounts"].items():
+        m = meta.get(acct_id, {})
+        ou = (str(m["ou"]).strip() if m.get("ou") not in (None, "") else "")
+        env_raw = m.get("envRaw")
+        env = normalize_env(env_raw)
+        if env_raw not in (None, "") and env is None:
+            log.warning("Account %s: unrecognised environment %r", acct_id, env_raw)
+        merged.append(
+            {
+                **info,
+                # short codes are lowercase by convention; the account-name fallback keeps its case
+                "shortName": str(m["shortName"]).strip().lower() if not _blank(m.get("shortName")) else info["name"],
+                "domain": ou or LEGACY_DOMAIN,
+                "env": env,
+                "envRaw": None if env_raw is None else str(env_raw),
+                "hasMetadata": bool(m),
+            }
+        )
+    orphans = set(meta) - set(org["accounts"])
+    if orphans:
+        log.warning("%d DDB entries match no active org account: %s", len(orphans), ", ".join(sorted(orphans)[:10]))
+    missing = sum(1 for a in merged if not a["hasMetadata"])
+    if missing:
+        log.warning("%d org accounts have no DDB metadata (shown as %s)", missing, LEGACY_DOMAIN)
+    return sorted(merged, key=lambda a: a["shortName"].lower())

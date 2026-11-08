@@ -1,0 +1,23 @@
+# Shell function names the toolbox supersedes. install.sh retires any other
+# ~/.functions.d/*.functions file whose definitions are ALL in this list
+# (timestamped backup first), and refuses to install if a file mixes these
+# with functions not listed here. One name per line.
+
+# Provided by shell/aws-toolbox.functions
+aws-assume-role
+aws-clear-identity
+aws-sts-decode-message
+aws-profile
+aws-whoami
+_aws_print_identity
+_aws_profile_complete
+
+# Provided by console scripts
+aws-sso-refresh
+aws-sts-decode
+aws-sync-profiles
+ns-cert-refresh
+
+# Superseded (logic absorbed or replaced; see README "Migrating")
+_aws_sso_session_ok
+aws-sso-sync
