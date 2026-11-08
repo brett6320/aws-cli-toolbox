@@ -202,6 +202,11 @@ Edit `~/.aws/toolbox.toml`. Every key is documented in
 | `sync.sso_session` **or** `sync.sso_start_url` + `sync.sso_region` | How generated profiles authenticate |
 | `sync.readonly_role` / `sync.admin_role` | Permission set names for `<name>` and `<name>-adm` profiles |
 
+That's for SSO profiles. For role-chained profiles, an org also needs
+`source_profile`, and usually `ddb_table_arn`, `roles` and `role_suffixes`. See
+[Assume-role profiles](#assume-role-profiles-from-the-account-mapping-table)
+and the [quick start](#quick-start-assume-role-profiles).
+
 Set `AWS_TOOLBOX_CONFIG` to keep the file somewhere else.
 
 #### More than one organization
@@ -236,12 +241,19 @@ profile_prefix = "globex-"
   at one. Anything else (keys only in `~/.aws/credentials`, `credential_process`)
   is refused, because the toolbox can't confirm which org it belongs to. The same
   check applies to `--profile`.
-- `readonly_role`, `admin_role` and `admin_suffix` come from `[sync]` unless the
-  org overrides them. Any other `[sync]` key can be set per org.
+- These `[sync]` keys are shared by every org unless the org sets its own:
+  - `readonly_role`, `admin_role`, `admin_suffix`;
+  - `roles`, `role_suffixes`, `require_short_name`, `account_name_aliases`;
+  - `ddb_role_name`, the `attr_*` keys, `include_inactive`.
+
+  Every other key is per org. `ddb_table_arn` and `ddb_profile` in `[sync]` are
+  an error once `[orgs.*]` tables exist.
 - Give each org its own `profile_prefix`. If two orgs still produce the same
   name, whichever org's block already has it keeps it, and the other gets an
   account-ID suffix.
-- Once any `[orgs.*]` table exists, the rest of `[sync]` is ignored.
+- Once any `[orgs.*]` table exists, every other `[sync]` key is ignored. That
+  includes `management_profile`, `sso_session`, `profile_prefix`,
+  `exclude_accounts`, `source_profile` and `role_source_profiles`.
 
 #### Assume-role profiles from the account-mapping table
 
@@ -567,7 +579,13 @@ With several orgs, each one gets its own `# BEGIN/END aws-toolbox managed
 profiles: <org>` block. If one org fails (expired login, access denied), its block
 is left as it was, the other orgs are still written, and the command exits 1.
 
-Each active account gets `<name>` (read-only role) and `<name>-adm` (admin role).
+How profiles are named depends on the org:
+- **SSO orgs:** each active account gets `<name>` (`readonly_role`) and
+  `<name>-adm` (`admin_role`).
+- **Assume-role orgs (`source_profile` set):** each account gets one profile per
+  entry in `roles`, named `<prefix><short name><suffix>`. See
+  [Role conventions](#role-conventions-and-how-to-customize-them).
+
 The profiles go inside a `# BEGIN/END aws-toolbox managed profiles` block. Anything
 outside that block is never touched, and a profile you defined yourself is never
 overwritten. Re-run it whenever accounts are added. If accounts were added under
@@ -592,7 +610,8 @@ aws-whoami                                    # profile, account, ARN, region
 
 # Decode an "Encoded authorization failure message"
 aws-sts-decode "$ENCODED"                     # with current credentials
-aws-sts-decode "$ENCODED" 123456789012        # with that account's profile (falls back to -adm)
+aws-sts-decode "$ENCODED" 123456789012        # with that account's SSO profile (falls back to -adm)
+aws-sts-decode "$ENCODED" --profile acme-prd-adm   # with a specific (e.g. role-chained) profile
 pbpaste | aws-sts-decode 123456789012         # message on stdin
 ```
 
@@ -604,7 +623,7 @@ The installer retires `~/.functions.d/aws-shell.functions` (backup in
 | Old | Now |
 |---|---|
 | `aws-assume-role` | `aws-assume-role`: same arguments. It also unsets `AWS_PROFILE` (which otherwise overrides the new creds) and doesn't need jq |
-| `aws-sso-refresh` | `aws-sso-refresh` command. Same `--force`. Adds the main-profile browser and `--no-browser` split from DESIGN.md |
+| `aws-sso-refresh` | `aws-sso-refresh` command. Same `--force`. Adds the DESIGN.md split: the main org's login opens the browser, and the others print a URL to open by hand (`--main-org`, `--main-profile`) |
 | `aws-sts-decode-message` | `aws-sts-decode`; the old name still works |
 | `aws-clear-identity`, `aws-profile`, `aws-whoami` | Unchanged, now in `aws-toolbox.functions` |
 | `aws-sso-sync` | `aws-sync-profiles`, which builds from Organizations with `<name>` / `<name>-adm` names. The old function built profiles from the SSO portal, one per account and role you can reach. Restore it from the backup if you need that |
@@ -623,9 +642,23 @@ the same account under the new naming.
 | `aws-profile [-n] [PROFILE]` | Sets `AWS_PROFILE`; fzf picker; SSO login if expired (zsh) | Shell env only |
 | `aws-whoami` | Prints profile, account, ARN, region (zsh) | No |
 | `aws-sts-decode [MESSAGE] [ACCOUNT]` | `sts:DecodeAuthorizationMessage`, pretty-printed | No |
-| `aws-sync-profiles` | Each org's accounts → `<name>` / `<name>-adm` profiles, one block per org | Dry-run unless `--execute` |
+| `aws-sync-profiles` | Each org's accounts → SSO profiles (`<name>`, `<name>-adm`), or role-chained profiles per role in assume-role orgs; one block per org | Dry-run unless `--execute` |
 | `ns-cert-refresh` | Netskope tenant CA + system CAs → bundle | Dry-run unless `--execute` |
 | `aws-toolbox init` | Writes the starter `~/.aws/toolbox.toml` | Yes (`--force` to overwrite) |
+
+Command options:
+
+| Command | Options |
+|---|---|
+| `aws-sso-refresh` | `--force` (log in even if the token is valid), `--main-org ORG`, `--main-profile PROFILE`, `--list` (show targets and token status) |
+| `aws-assume-role` | `--profile` (source credentials), `--session-name`, `--duration SECONDS`, `--format sh\|fish\|json` |
+| `aws-sts-decode` | `--profile` (decode with this profile), `--raw` (don't reformat the JSON) |
+| `aws-sync-profiles` | `--execute`/`--apply`, `--org ORG` (repeatable), `--profile` (override `management_profile`; one org), `--force` (rebuild with account names when the table is unreadable, or write an empty block). Table overrides, one org at a time: `--ddb-table-arn`, `--ddb-profile`, `--ddb-role-name`, `--attr-account-id`, `--attr-short-name`, `--attr-ou`, `--attr-environment`, `--roles A,B`, `--include-inactive` |
+| `ns-cert-refresh` | `--execute`/`--apply`, `--output PATH` (override `bundle_path`) |
+| `aws-toolbox init` | `--force` |
+
+`aws-sts-decode ACCOUNT` looks the account up among SSO profiles
+(`sso_account_id`) only. For a role-chained profile, pass `--profile` instead.
 
 Every command takes `-v`/`--verbose`, `-q`/`--quiet` and `--help`, placed after
 the command name. Each one also works as `aws-toolbox <command>`. Logs go to
@@ -639,7 +672,18 @@ stderr; stdout carries only results (diffs, JSON, shell exports).
 
 ## IAM permissions
 
-- sync-profiles: `organizations:ListAccounts`, in the management account or a delegated administrator account
+- **sync-profiles, SSO orgs:** `organizations:ListAccounts`, in the management
+  account or a delegated administrator account.
+- **sync-profiles, assume-role orgs:**
+  - for `management_profile`: `organizations:ListRoots`,
+    `organizations:ListOrganizationalUnitsForParent`,
+    `organizations:ListAccountsForParent`, `organizations:DescribeOrganization`
+    and `sts:GetCallerIdentity`;
+  - for the credentials that read the table: `dynamodb:Scan` on the table;
+  - when the table is read through `ddb_role_name`: `sts:AssumeRole` on that
+    role in the table's account.
+- **sso-refresh:** `sts:GetCallerIdentity`, to tell whether a login is still
+  usable.
 - assume-role: `sts:AssumeRole` on the target role, which must also trust the caller
 - generated assume-role profiles: each first-hop permission set needs `sts:AssumeRole` on its target role, and each target role must trust that first hop; see [AWS side, per tier](#aws-side-per-tier)
 - sts-decode: `sts:DecodeAuthorizationMessage`, in the account that produced the message
