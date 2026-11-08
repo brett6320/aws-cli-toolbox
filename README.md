@@ -9,6 +9,116 @@ All boto3 traffic from these commands uses the OS trust store via `truststore`.
 In your own boto3 scripts, call `truststore.inject_into_ssl()` (or `import aws_toolbox`)
 before importing boto3.
 
+## Quick start: assume-role profiles
+
+The shortest path from nothing to one working profile per account. It uses
+the example names from [Role conventions](#role-conventions-and-how-to-customize-them).
+Replace `acme`, the IDs and the URL with yours. [Getting started](#getting-started)
+below covers each step in full.
+
+**Before you start**, someone with Identity Center admin needs to have set up:
+
+- a permission set (here `ReadOnly`) assigned to you in the source account
+  (here the billing account, `111111111111`), with an inline policy that
+  allows `sts:AssumeRole` on the target role;
+- a role with the same name in every target account (here `ReadOnly`), whose
+  trust policy allows that permission set.
+
+The JSON for both is under [AWS side, per tier](#aws-side-per-tier).
+
+1. **Install** (needs Python 3.11+, uv and AWS CLI v2):
+
+   ```bash
+   git clone <repo-url> ~/Code/aws-cli-toolbox && cd ~/Code/aws-cli-toolbox
+   ./install.sh --execute
+   exec $SHELL -l
+   ```
+
+2. **Add the SSO session and your first profile** to `~/.aws/config`. This
+   first profile is the first hop: an ordinary SSO profile that every
+   generated profile chains from. Use a name that can't be an account short
+   name, such as `acme-sso-ro`. Find the portal URL and its region in the
+   IAM Identity Center console under **Settings**. If you sign in through
+   another identity provider, such as Entra ID or Okta, follow its AWS app
+   link once and copy the `https://….awsapps.com/start` address it ends on.
+
+   ```ini
+   [sso-session acme]
+   sso_start_url = https://my-org.awsapps.com/start
+   sso_region = us-east-1
+   sso_registration_scopes = sso:account:access
+
+   [profile acme-sso-ro]
+   sso_session = acme
+   sso_account_id = 111111111111
+   sso_role_name = ReadOnly
+   region = us-east-1
+   ```
+
+3. **Log in and check the first hop:**
+
+   ```bash
+   aws sso login --sso-session acme
+   aws sts get-caller-identity --profile acme-sso-ro
+   ```
+
+   The ARN should be
+   `arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_ReadOnly_…/you@example.com`.
+
+4. **Configure the org** in `~/.aws/toolbox.toml`, including the ARN of the
+   account table. Without it, profiles are named after the accounts instead
+   of their short names, with a warning:
+
+   ```toml
+   [sso]
+   main_org = "acme"
+
+   [sync]
+   roles = ["ReadOnly"]
+   role_suffixes = { "ReadOnly" = "-ro" }
+
+   [orgs.acme]
+   sso_session = "acme"
+   management_profile = "acme-sso-ro"   # needs organizations:ListAccounts
+   source_profile = "acme-sso-ro"       # the first hop from step 2
+   profile_prefix = "acme-"
+   ddb_table_arn = "arn:aws:dynamodb:us-east-1:222222222222:table/account-mapping"
+   # ddb_profile = "..."                # optional: a profile that can read the table
+   ```
+
+5. **Preview, then write:**
+
+   ```bash
+   aws-sync-profiles --org acme             # dry run: prints the diff
+   aws-sync-profiles --org acme --execute   # writes it, after a backup
+   ```
+
+   If the first hop can't read the table yet, the profiles are named after
+   the accounts. Run steps 5 and 6 once more and they're renamed to short
+   names, using the newly generated profile for the table's account (see
+   "No table access yet (bootstrap)" below).
+
+6. **Check a generated profile:**
+
+   ```bash
+   aws sts get-caller-identity --profile acme-prd-ro
+   ```
+
+   The ARN should be `arn:aws:sts::<prd account>:assumed-role/ReadOnly/…`.
+   If it says `AccessDenied` on `AssumeRole`, one of the two policies above is
+   missing.
+
+7. **Add more tiers** when you need them, Read-Only-Plus first for day-to-day
+   work. For each one:
+   - create its permission set and target role;
+   - add an SSO profile like step 2 (`acme-sso-rop`);
+   - add it to `roles`, `role_suffixes` and `role_source_profiles`;
+   - run step 5 again.
+
+   See [Customizing](#customizing).
+
+Afterwards, `aws-sso-refresh` logs in again when the session expires.
+
 ## Getting started
 
 Do these steps once, in order. Steps 5–7 are the day-to-day loop afterwards.
@@ -136,25 +246,40 @@ profile_prefix = "globex-"
 #### Assume-role profiles from the account-mapping table
 
 Set `source_profile` on an org to generate role-chained profiles instead of SSO
-ones. It follows the same conventions as the switch-role bookmarks generator,
-and reads the same `.env` keys, so both tools can share one file:
+ones. It follows the same conventions as the switch-role bookmarks generator.
+Everything is set in `toolbox.toml`; no `.env` file is read:
 
 ```toml
 [orgs.acme]
 sso_session = "acme"
-management_profile = "acme-bil-ro"       # reads Organizations
-source_profile = "acme-bil-cpa"          # SSO profile every generated profile chains from
-env_file = "~/path/to/shared.env"
+management_profile = "acme-sso-ro"       # reads Organizations
+source_profile = "acme-sso-cpa"          # SSO profile every generated profile chains from
 profile_prefix = "acme-"
+ddb_table_arn = "arn:aws:dynamodb:us-east-1:222222222222:table/account-mapping"
 ```
 
+Table settings (per org unless noted; all optional except `ddb_table_arn`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ddb_table_arn` | — | The account-mapping table. Per org (in `[sync]` only when there are no `[orgs.*]`). |
+| `ddb_profile` | — | Profile used to read the table. Per org, like `ddb_table_arn`. |
+| `ddb_role_name` | `OrganizationAccountAccessRole` | Role assumed in the table's account when no profile there works. `[sync]` or per org. |
+| `attr_account_id` / `attr_short_name` / `attr_ou` / `attr_environment` | `accountNumber` / `accountShortCode` / `ou` / `environment` | Table attribute names. `[sync]` or per org. |
+| `include_inactive` | `false` | Include suspended, pending-closure and closed accounts. `[sync]` or per org. |
+
+**No table configured:** without `ddb_table_arn`, the run warns and still
+generates every profile, named after the account (`acme-shared-services-ro`),
+with no domain or environment in the comment line. `require_short_name` is
+ignored. Add `ddb_table_arn` later and run again to switch to short names.
+
 - **Accounts:** the full OU tree from the root. Suspended, pending-closure and
-  closed accounts are skipped unless you pass `--include-inactive` (or set
-  `BM_INCLUDE_INACTIVE=true`).
-- **Metadata:** the DynamoDB table in `BM_DDB_TABLE_ARN`, matched on
-  `accountNumber` (zero-padded to 12 digits). It's read with `BM_DDB_PROFILE`,
+  closed accounts are skipped unless you set `include_inactive = true` or pass
+  `--include-inactive`.
+- **Metadata:** the DynamoDB table at `ddb_table_arn`, matched on
+  `accountNumber` (zero-padded to 12 digits). It's read with `ddb_profile`,
   else the Organizations profile if it's in the table's account, else by
-  assuming `BM_DDB_ROLE_NAME`. The run stops if those credentials aren't in the
+  assuming `ddb_role_name`. The run stops if those credentials aren't in the
   table's account. An account with more than one row is skipped with a warning.
   The table is only read, never written.
 - **Names:** `<prefix><short name><suffix>`, where the short name is
@@ -173,7 +298,8 @@ profile_prefix = "acme-"
   ```
 
   For an account with short name `prd` this gives `acme-prd`, `acme-prd-ro`
-  and `acme-prd-adm`.
+  and `acme-prd-adm`. See [Role conventions](#role-conventions-and-how-to-customize-them)
+  for the suggested tiers and how to change them.
 - **Only accounts with a short name:** set `require_short_name = true` (in
   `[sync]` or per org; assume-role orgs only) to skip accounts whose short-name
   attribute (default `accountShortCode`) is empty or that have no table row,
@@ -202,9 +328,16 @@ profile_prefix = "acme-"
   duplicate table rows, removes the profiles that later runs fall back to.
 - **Precedence:** command-line flags (`--ddb-table-arn`, `--ddb-profile`,
   `--ddb-role-name`, `--attr-*`, `--roles`, `--include-inactive`, `--profile`),
-  then the org's `toolbox.toml` keys, then environment variables, then
-  `env_file`, then defaults. With several orgs, the table flags need
-  `--org NAME`. A relative `env_file` is resolved against `toolbox.toml`'s directory.
+  then the org's `toolbox.toml` keys, then the bookmarks generator's
+  environment variables (`BM_DDB_TABLE_ARN`, `BM_DDB_PROFILE`,
+  `BM_DDB_ROLE_NAME`, `BM_ATTR_*`, `BM_DEFAULT_ROLES`, `BM_INCLUDE_INACTIVE`),
+  then defaults. With `[orgs.*]` tables, `BM_DDB_TABLE_ARN` and
+  `BM_DDB_PROFILE` are ignored, since a shell variable can't tell orgs apart. An
+  empty or whitespace-only toml value counts as unset. With several orgs, the
+  table flags need `--org NAME`.
+- **`env_file` was removed.** A `toolbox.toml` that still sets it is refused
+  with a message saying so. Move `BM_DDB_TABLE_ARN` to `ddb_table_arn`,
+  `BM_DDB_PROFILE` to `ddb_profile`, `BM_DEFAULT_ROLES` to `roles`, and so on.
 - `source_profile` must be defined by hand outside the managed block and sign in
   at the org's portal. Each role in the list must trust it.
 - **A different source per role:** `role_source_profiles` (per org) chains the
@@ -213,8 +346,8 @@ profile_prefix = "acme-"
 
   ```toml
   [orgs.acme]
-  source_profile = "acme-billing-cpa"
-  role_source_profiles = { "Account-Admin" = "acme-billing-adm" }
+  source_profile = "acme-sso-cpa"
+  role_source_profiles = { "Account-Admin" = "acme-sso-adm" }
   ```
 
   Each of these profiles has the same requirements as `source_profile`.
@@ -226,6 +359,144 @@ profile would get an account-ID suffix. Back up `~/.aws/config`, delete
 everything from the `# BEGIN aws-toolbox managed profiles (do not edit…` line
 to its `# END` line, and make sure each org's management profile is defined
 outside the managed blocks. Then run the dry-run again.
+
+#### Role conventions and how to customize them
+
+Every assume-role profile is two hops:
+
+1. **First hop:** an SSO profile you define by hand. It signs in to a
+   permission set in the account that holds `source_profile`, usually the
+   billing or management account.
+2. **Second hop:** an IAM role, with the same name in every target account. The
+   generated profile sets `role_arn` to that role and `source_profile` to the
+   first-hop profile.
+
+The suggested convention has four tiers. Use the lowest one that does the job:
+
+| Tier | First hop (SSO permission set → profile) | Second hop (target role) | Suffix | For |
+|---|---|---|---|---|
+| Read only | `ReadOnly` → `acme-sso-ro` | `ReadOnly` | `-ro` | Looking around; auditors, on-call triage |
+| Read only plus | `ReadOnlyPlus` → `acme-sso-rop` | `Read-Only-Plus` | `-rop` | Day-to-day work for power users and platform administrators |
+| Platform admin | `PlatformAdmin` → `acme-sso-cpa` | `Platform-Admin` | *(none)* | Platform changes that need broad write access |
+| Account admin | `AccountAdmin` → `acme-sso-adm` | `Account-Admin` | `-adm` | Break-glass and IAM changes; full admin |
+
+**Read only plus** is the everyday role for people who would otherwise reach
+for an admin role out of habit. Start the target role from `ReadOnlyAccess`
+and add only the routine operational actions your team does daily. For example:
+
+- reading secrets and parameters (`secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `kms:Decrypt`) where your policy allows it;
+- Session Manager (`ssm:StartSession`, `ssm:TerminateSession`, `ssm:ResumeSession`);
+- restarting things (`ec2:RebootInstances`, `ecs:UpdateService` for force-redeploys, `lambda:InvokeFunction`);
+- CloudWatch Logs Insights queries and support cases (`logs:StartQuery`, `support:*`).
+
+Leave out IAM writes, Organizations, SSO administration, deleting data and
+changing network boundaries. Those stay with the admin tiers. Pair it with a
+permissions boundary or SCP if you want a hard ceiling. The toolbox doesn't
+create any of these roles or permission sets. It only writes profiles that
+point at them.
+
+The toolbox config for that convention:
+
+```toml
+[sync]                     # shared by every org; any org may override
+roles = ["ReadOnly", "Read-Only-Plus", "Platform-Admin", "Account-Admin"]
+role_suffixes = { "ReadOnly" = "-ro", "Read-Only-Plus" = "-rop", "Platform-Admin" = "", "Account-Admin" = "-adm" }
+
+[orgs.acme]                # per org only; never inherited from [sync]
+# ...plus the usual org keys (sso_session, management_profile, ...)
+source_profile = "acme-sso-cpa"      # first hop for any role not listed below
+role_source_profiles = { "Read-Only-Plus" = "acme-sso-rop", "ReadOnly" = "acme-sso-ro", "Account-Admin" = "acme-sso-adm" }
+```
+
+For an account with short name `prd` this gives `acme-prd-ro`, `acme-prd-rop`,
+`acme-prd` and `acme-prd-adm`. Each one chains from its own tier's first hop.
+The read-only roles come first so that, when the table has to be read through
+generated profiles, the least-privileged role is tried first.
+
+##### What each setting controls
+
+| Setting | Where | What it does |
+|---|---|---|
+| `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BM_DEFAULT_ROLES`. |
+| `role_suffixes` | `[sync]` or per org | Role → profile-name suffix. `""` means no suffix (only one role can have it). Otherwise lowercase `-x`, `-x-y`, and so on. Suffixes must be unique. A role with no entry gets `-<role name>`, lowercased and made safe for a profile name. |
+| `source_profile` | per org (or `[sync]` when there are no `[orgs.*]`) | The default first hop, used for every role not in `role_source_profiles`. Setting it switches the org to assume-role mode. |
+| `role_source_profiles` | per org (or `[sync]` when there are no `[orgs.*]`); never inherited | Role → first-hop profile. This is how each second-hop role gets its matching first hop. |
+
+An org's own `roles` or `role_suffixes` replaces the `[sync]` value as a
+whole; the two are not merged.
+
+##### Customizing
+
+- **Add a tier:** create the permission set and target role in AWS (see
+  [IAM permissions](#iam-permissions)), add a hand-written SSO profile for the
+  first hop, then add the role to `roles`, `role_suffixes` and
+  `role_source_profiles`. Do a dry run, then `--execute`.
+- **Rename a role:** change the name in `roles`, `role_suffixes` and
+  `role_source_profiles`, and in AWS update the first hop's inline policy and
+  the trust policy. A `role_suffixes` or `role_source_profiles` key that names
+  no role is ignored when profiles are built, so a missed key quietly falls
+  back to `-<role name>` or to `source_profile`. Check the dry-run diff. Every
+  `role_source_profiles` value is still checked, though: if a stale key points
+  at a profile you've deleted, the run stops. Remove stale keys.
+- **Change a suffix:** edit `role_suffixes` and rerun. Profiles with the old
+  names are removed from the managed block. Update any scripts or
+  `AWS_PROFILE` settings that used them.
+- **Drop a tier:** remove the role from `roles`. Its profiles go away on the
+  next `--execute`.
+- **Different tiers per org:** set `roles`/`role_suffixes` under `[orgs.NAME]`.
+- **Keep first-hop names clear of generated names.** Give hand-written
+  first hops a stem that can't be an account short name, like `acme-sso-`. If
+  one has the same name as a generated profile (say a first hop
+  `acme-billing-ro` and an account with short name `billing`), the account's
+  ID goes into the base name of every profile for that account:
+  `acme-billing-111111111111`, `acme-billing-111111111111-ro`, and so on.
+
+##### AWS side, per tier
+
+- **First hop:** the permission set must allow assuming its target role.
+  `ReadOnlyAccess` doesn't include `sts:AssumeRole`, so add an inline policy.
+  Admin sets already allow it, but a scoped statement makes the link clear:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole", "sts:TagSession"],
+      "Resource": "arn:aws:iam::*:role/Read-Only-Plus"
+    }]
+  }
+  ```
+
+- **Second hop:** the target role's trust policy must trust the first hop's
+  SSO role in the source account. The role ARN includes the SSO path and a
+  random suffix, so match it with a condition instead of listing it as the
+  principal:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::111111111111:root" },
+      "Action": ["sts:AssumeRole", "sts:TagSession"],
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::111111111111:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_ReadOnlyPlus_*"
+        }
+      }
+    }]
+  }
+  ```
+
+  `111111111111` is the account that holds the first-hop permission set. The
+  wildcard after `sso.amazonaws.com/` covers both SSO role paths, with or
+  without a region segment. Repeat both policies for each tier, with its own
+  role and permission-set names.
+
+If `aws sts get-caller-identity --profile acme-prd-rop` returns
+`AccessDenied` on `AssumeRole`, check that the error names the target role. If
+it does, one of these two policies is missing that role or that first hop.
 
 ### 4. Bootstrap `~/.aws/config`
 
@@ -363,6 +634,7 @@ stderr; stdout carries only results (diffs, JSON, shell exports).
 
 - sync-profiles: `organizations:ListAccounts`, in the management account or a delegated administrator account
 - assume-role: `sts:AssumeRole` on the target role, which must also trust the caller
+- generated assume-role profiles: each first-hop permission set needs `sts:AssumeRole` on its target role, and each target role must trust that first hop; see [AWS side, per tier](#aws-side-per-tier)
 - sts-decode: `sts:DecodeAuthorizationMessage`, in the account that produced the message
 
 ## Development

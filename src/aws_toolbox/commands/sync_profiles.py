@@ -42,7 +42,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--org", action="append", help="Only sync this org (repeatable; default: all)")
     parser.add_argument("--profile", help="Override the org's management_profile (needs a single org)")
     parser.add_argument("--force", action="store_true", help="Write even if no accounts were found")
-    meta = parser.add_argument_group("assume-role mode (override the org's env_file; need a single org)")
+    meta = parser.add_argument_group("assume-role mode (override the org's toolbox.toml keys; need a single org)")
     meta.add_argument("--ddb-table-arn", help="Account metadata table ARN (BM_DDB_TABLE_ARN)")
     meta.add_argument("--ddb-profile", help="Profile for the table's account (BM_DDB_PROFILE)")
     meta.add_argument("--ddb-role-name", help="Role assumed in the table's account (BM_DDB_ROLE_NAME)")
@@ -58,6 +58,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 # Flags that map straight onto account_meta settings.
 META_FLAGS = ("ddb_table_arn", "ddb_profile", "ddb_role_name", "attr_account_id", "attr_short_name",
               "attr_ou", "attr_environment", "roles", "include_inactive")
+# toolbox.toml keys with the same names; unset ones fall back to BM_* variables.
+PER_ORG_TABLE_KEYS = ("ddb_table_arn", "ddb_profile")
+META_TOML_KEYS = ("ddb_table_arn", "ddb_profile", "ddb_role_name", "attr_account_id", "attr_short_name",
+                  "attr_ou", "attr_environment", "include_inactive")
 
 
 def list_accounts(org_client) -> list[dict]:
@@ -258,16 +262,28 @@ def _check_org(name: str, org: dict, text: str, profile: str | None) -> str | No
     return None
 
 
-def meta_settings(org: dict, args: argparse.Namespace) -> dict:
-    """account_meta settings for an assume-role org: flags > toml > env > env_file > defaults."""
-    env_path = None
-    if org["env_file"]:
-        env_path = Path(org["env_file"]).expanduser()
-        if not env_path.is_absolute():
-            env_path = config.config_path().parent / env_path  # relative to toolbox.toml
-        if not env_path.is_file():
-            raise ValueError(f"env_file {env_path} not found")
+def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
+    """account_meta settings for an assume-role org: flags > toml > environment > defaults.
+
+    With [orgs.*] tables (`name` set), the table and its profile come only from
+    the org's own keys or flags: a BM_DDB_TABLE_ARN in the shell belongs to one org.
+    """
     kwargs = {k: getattr(args, k) for k in META_FLAGS if getattr(args, k, None) is not None}
+    for key in META_TOML_KEYS:
+        value = org[key]
+        if key == "include_inactive":
+            if value is not None and not isinstance(value, bool):
+                raise ValueError("include_inactive must be true or false")
+        elif not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        else:
+            value = value.strip()
+        if key in kwargs:
+            continue
+        if value not in (None, ""):
+            kwargs[key] = value
+        elif name and key in PER_ORG_TABLE_KEYS:
+            kwargs[key] = ""  # not None: keeps resolve_settings from reading the environment
     roles = org["roles"]
     if isinstance(roles, str):
         roles = roles.split(",")
@@ -278,10 +294,7 @@ def meta_settings(org: dict, args: argparse.Namespace) -> dict:
         kwargs["roles"] = roles
     if args.profile or org["management_profile"]:
         kwargs["profile"] = args.profile or org["management_profile"]
-    dotenv = account_meta.read_dotenv(env_path)
-    for var in account_meta.env_overrides(dotenv):
-        log.warning("%s from the environment overrides a different value in %s", var, env_path)
-    settings = account_meta.resolve_settings(kwargs, dotenv)
+    settings = account_meta.resolve_settings(kwargs)
     if not settings["roles"]:
         raise ValueError("no roles configured (roles, BM_DEFAULT_ROLES or --roles)")
     settings["role_suffixes"] = role_suffixes(settings["roles"], org["role_suffixes"])
@@ -371,12 +384,20 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
         log.error("%s: %s", _label(name), e)
         return None
 
-    try:
-        table = read_table(name, s, org_session, text)
-    except TableError as e:
-        log.error("%s: can't read the metadata table: %s", _label(name), e)
-        return None
-    if table is None:
+    if not s["ddb_table_arn"]:
+        log.warning("%s: no metadata table configured (ddb_table_arn); naming profiles after "
+                    "their accounts%s", _label(name),
+                    " and ignoring require_short_name" if org["require_short_name"] else "")
+        table = None
+    else:
+        try:
+            table = read_table(name, s, org_session, text)
+        except TableError as e:
+            log.error("%s: can't read the metadata table: %s", _label(name), e)
+            return None
+    if table is None and not s["ddb_table_arn"]:
+        meta, dupes = {}, set()
+    elif table is None:
         if awsconfig.has_managed_block(text, name):
             if not args.force:
                 # A temporary access problem must not rename every existing profile.
@@ -407,8 +428,8 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
             log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
                      _label(name), len(named), len(accounts))
             accounts = named
-    if s["ddb_account_id"] not in {a["id"] for a in accounts} or \
-            s["ddb_account_id"] in {str(x) for x in org["exclude_accounts"]}:
+    if s["ddb_account_id"] and (s["ddb_account_id"] not in {a["id"] for a in accounts} or
+                                s["ddb_account_id"] in {str(x) for x in org["exclude_accounts"]}):
         log.warning("%s: no profiles for the table's account %s (excluded, inactive, duplicate rows "
                     "or not in this org); later runs can't fall back to them to read the table",
                     _label(name), s["ddb_account_id"])
@@ -469,7 +490,7 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
     for name in selected:
         if orgs[name]["source_profile"]:
             try:
-                settings[name] = meta_settings(orgs[name], args)
+                settings[name] = meta_settings(orgs[name], args, name)
             except (ValueError, TypeError) as e:
                 log.error("%s in %s: %s", _label(name), config.config_path(), e)
                 return 2

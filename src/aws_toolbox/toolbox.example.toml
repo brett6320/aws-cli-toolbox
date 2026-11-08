@@ -60,26 +60,37 @@ exclude_accounts = []
 # org's OU tree, short names / business domains / environments from the
 # account-mapping DynamoDB table, and each account gets one profile per role,
 # `<prefix><short name>-<role>`, with role_arn + source_profile instead of SSO.
-# Table and roles are read from env_file using the same BM_* keys as the
-# switch-role bookmarks generator (BM_DDB_TABLE_ARN, BM_DDB_PROFILE,
-# BM_DDB_ROLE_NAME, BM_ATTR_*, BM_DEFAULT_ROLES, BM_INCLUDE_INACTIVE).
+# Table settings are toolbox.toml keys. Unset ones fall back to the switch-role
+# bookmarks generator's environment variables (BM_DDB_TABLE_ARN, BM_DDB_PROFILE,
+# BM_DDB_ROLE_NAME, BM_ATTR_*, BM_DEFAULT_ROLES, BM_INCLUDE_INACTIVE), then defaults.
 #
 # [orgs.acme]
 # sso_session = "acme"
-# management_profile = "acme-bil-ro"     # reads Organizations
-# source_profile = "acme-bil-cpa"        # every generated profile chains from this
-# env_file = "~/path/to/shared.env"
+# management_profile = "acme-sso-ro"     # reads Organizations
+# source_profile = "acme-sso-cpa"        # every generated profile chains from this
+# ddb_table_arn = "arn:aws:dynamodb:us-east-1:222222222222:table/account-mapping"   # per org;
+#                                        # unset: warn, name profiles after accounts
+# ddb_profile = "acme-ops-ro"           # optional; per org. Profile that can read the table
 # profile_prefix = "acme-"
 # roles = []                               # [] = BM_DEFAULT_ROLES
-# role_source_profiles = { "Account-Admin" = "acme-billing-adm" }   # per-role source
+# role_source_profiles = { "Read-Only-Plus" = "acme-sso-rop", "ReadOnly" = "acme-sso-ro", "Account-Admin" = "acme-sso-adm" }
+#                                          # per-role first hop; per org only
 #
 # Role list and profile-name suffixes for assume-role orgs. Set them in [sync]
 # to share them across orgs, or per org to override. "" = no suffix; an
-# unmapped role gets "-<role name>".
+# unmapped role gets "-<role name>". Suggested tiers (README: "Role conventions"):
+# Read-Only-Plus is the day-to-day role; the admin tiers are for when it isn't enough.
 # [sync]
-# roles = ["Platform-Admin", "ReadOnly", "Account-Admin"]
-# role_suffixes = { "Platform-Admin" = "", "ReadOnly" = "-ro", "Account-Admin" = "-adm" }
+# roles = ["ReadOnly", "Read-Only-Plus", "Platform-Admin", "Account-Admin"]
+# role_suffixes = { "ReadOnly" = "-ro", "Read-Only-Plus" = "-rop", "Platform-Admin" = "", "Account-Admin" = "-adm" }
 # require_short_name = true   # skip accounts without a short name in the table
+# Shared table settings ([sync] or per org):
+# ddb_role_name = "OrganizationAccountAccessRole"   # assumed in the table's account
+# attr_account_id = "accountNumber"
+# attr_short_name = "accountShortCode"
+# attr_ou = "ou"
+# attr_environment = "environment"
+# include_inactive = false
 
 [netskope]
 bundle_path = "~/.aws/ca-bundle.pem"

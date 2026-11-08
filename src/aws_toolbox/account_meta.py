@@ -1,15 +1,14 @@
 """Account list and metadata, shared with the switch-role bookmarks generator.
 
 Ported from its aws_bookmarks.py (sha256 0b78c68a3789…),
-which isn't an installable package. Keep the two in step: same .env keys, same
+which isn't an installable package. Keep the two in step: same BM_* keys, same
 defaults, same normalization. Deliberate differences, all marked "differs:":
-  - read_dotenv returns a dict instead of filling os.environ, so two orgs can
-    use different .env files in one run;
-  - resolve_settings takes that dict and only the settings sync uses;
+  - no .env file: settings come from toolbox.toml (passed in as kwargs), then
+    the environment, so each org can have its own table in one run;
+  - resolve_settings takes only the settings sync uses, and the table is
+    optional (no ddb_table_arn: the ddb_* values are None);
   - fetch_metadata reports account IDs with more than one row so the caller
     can skip them (the generator uses the last row);
-  - resolve_settings can report environment variables that hide a different
-    env_file value (env_overrides);
   - clients come from aws_toolbox.session (3 adaptive retries, not 8), and the
     assumed-role session name is "aws-cli-toolbox".
 """
@@ -19,7 +18,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import boto3
@@ -69,57 +67,32 @@ SETTINGS = {
 }
 
 
-def read_dotenv(path: Path | None) -> dict[str, str]:
-    """Minimal .env reader (KEY=VALUE lines). Missing file -> {}.
-
-    differs: returns the values instead of os.environ.setdefault-ing them.
-    """
-    out: dict[str, str] = {}
-    if path is None or not path.is_file():
-        return out
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[7:].strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        out.setdefault(key, value)
-    return out
-
-
 def get_session(profile: str | None, region: str) -> boto3.Session:
     return boto3.Session(profile_name=profile, region_name=region)
 
 
-def env_overrides(dotenv: Mapping[str, str]) -> list[str]:
-    """Settings env vars that hide a different value from the env_file."""
-    return sorted(var for var, _ in SETTINGS.values()
-                  if var in dotenv and os.environ.get(var) not in (None, dotenv[var]))
+def resolve_settings(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """kwargs > environment > defaults.
 
-
-def resolve_settings(kwargs: Mapping[str, Any], dotenv: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """kwargs > environment > .env > defaults (existing env vars beat .env, as in the generator)."""
+    differs: no .env file; the caller passes toolbox.toml values in kwargs.
+    """
     unknown = set(kwargs) - set(SETTINGS)
     if unknown:
         raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
-    environ = {**(dotenv or {}), **os.environ}
     cfg: dict[str, Any] = {}
     for key, (env_var, default) in SETTINGS.items():
         value = kwargs.get(key)
         if value is None:
-            value = environ.get(env_var) or default
+            value = os.environ.get(env_var) or default
         cfg[key] = value
     if isinstance(cfg["roles"], str):
         cfg["roles"] = [r.strip() for r in cfg["roles"].split(",") if r.strip()]
     if isinstance(cfg["include_inactive"], str):
         cfg["include_inactive"] = cfg["include_inactive"].lower() in ("1", "true", "yes")
     if not cfg["ddb_table_arn"]:
-        raise ValueError("ddb_table_arn is required (BM_DDB_TABLE_ARN in the org's env_file, or --ddb-table-arn)")
+        # differs: the table is optional; without one, sync names profiles after accounts.
+        cfg["ddb_table"] = cfg["ddb_account_id"] = cfg["ddb_region"] = None
+        return cfg
     m = TABLE_ARN_RE.match(cfg["ddb_table_arn"].strip())
     if not m:
         raise ValueError(f"Not a DynamoDB table ARN: {cfg['ddb_table_arn']}")
