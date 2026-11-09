@@ -172,9 +172,10 @@ def test_table_keys_per_org_and_inherited_attrs():
     assert orgs["acme"]["attr_ou"] == "domain" and orgs["acme"]["include_inactive"] is True  # shared
     assert orgs["globex"]["attr_ou"] == "bu"                                                # overridden
     assert orgs["acme"]["ddb_table_arn"] == TABLE_ARN and orgs["globex"]["ddb_table_arn"] == ""
-    for key in ("ddb_table_arn", "ddb_profile"):  # per org only: a [sync] value would be ignored
+    per_org = {"ddb_table_arn": "x", "ddb_profile": "x", "source_profile": "x", "role_source_profiles": {"R": "x"}}
+    for key, value in per_org.items():  # per org only: a [sync] value would be ignored
         with pytest.raises(ValueError, match=f"\\[sync\\] {key} isn't used"):
-            config.orgs({**cfg, "sync": {**cfg["sync"], key: "x"}})
+            config.orgs({**cfg, "sync": {**cfg["sync"], key: value}})
 
 
 def test_meta_settings_named_org_ignores_table_env(isolated_aws, monkeypatch):

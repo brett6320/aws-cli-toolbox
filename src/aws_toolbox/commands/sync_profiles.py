@@ -498,6 +498,8 @@ def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: di
         log.error("%s: %s", _label(name), e)
         return None
     log.info("%s: found %d active accounts", _label(name), len(accounts))
+    log.info("%s: SSO mode (no source_profile or role_source_profiles): sso_role_name %s / %s",
+             _label(name), org["readonly_role"], org["admin_role"])
     block = build_block(accounts, org, cfg["defaults"], awsconfig.reserved_profile_names(text, name))
     if not block and not args.force:
         log.error("%s: no profiles to write; refusing to empty its managed block (use --force)", _label(name))
