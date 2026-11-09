@@ -64,8 +64,8 @@ exclude_accounts = []
 # account-mapping DynamoDB table, and each account gets one profile per role,
 # `<prefix><short name>-<role>`, with role_arn + source_profile instead of SSO.
 # Table settings are toolbox.toml keys. Unset ones fall back to the switch-role
-# bookmarks generator's environment variables (BM_DDB_TABLE_ARN, BM_DDB_PROFILE,
-# BM_DDB_ROLE_NAME, BM_ATTR_*, BM_DEFAULT_ROLES, BM_INCLUDE_INACTIVE), then defaults.
+# bookmarks generator's environment variables (BG_DDB_TABLE_ARN, BG_DDB_PROFILE,
+# BG_DDB_ROLE_NAME, BG_ATTR_*, BG_DEFAULT_ROLES, BG_INCLUDE_INACTIVE), then defaults.
 #
 # [orgs.acme]
 # sso_session = "acme"
@@ -75,7 +75,7 @@ exclude_accounts = []
 #                                        # unset: warn, name profiles after accounts
 # ddb_profile = "acme-ops-ro"           # optional; per org. Profile that can read the table
 # profile_prefix = "acme-"
-# roles = []                               # [] = BM_DEFAULT_ROLES
+# roles = []                               # [] = BG_DEFAULT_ROLES
 # role_source_profiles = { "Read-Only-Plus" = "acme-sso-rop", "ReadOnly" = "acme-sso-ro", "Account-Admin" = "acme-sso-adm" }
 #                                          # per-role first hop; per org only
 #

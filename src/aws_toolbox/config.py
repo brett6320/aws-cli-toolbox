@@ -30,12 +30,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # Assume-role mode (set source_profile): accounts come from the org tree,
         # short names/domains/environments from the account-mapping table at
         # ddb_table_arn, and one role_arn profile per role, chained from
-        # source_profile. roles = [] means BM_DEFAULT_ROLES. role_suffixes maps a
+        # source_profile. roles = [] means BG_DEFAULT_ROLES. role_suffixes maps a
         # role to its profile-name suffix ("" = none); unmapped roles get
         # "-<role name>".
         "source_profile": "",
         # Table settings. Empty (or include_inactive unset) falls back to the
-        # matching BM_* environment variable, then the built-in default.
+        # matching BG_* environment variable, then the built-in default.
         "ddb_table_arn": "",
         "ddb_profile": "",
         "ddb_role_name": "",
@@ -113,7 +113,7 @@ def orgs(cfg: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     tables = {"sync": cfg["sync"], **{f"orgs.{n}": v for n, v in defined.items() if isinstance(v, dict)}}
     for where, values in tables.items():
         if "env_file" in values:
-            raise ValueError(f"[{where}]: env_file was removed; set ddb_table_arn (and any other BM_* "
+            raise ValueError(f"[{where}]: env_file was removed; set ddb_table_arn (and any other BG_* "
                              "values, e.g. ddb_profile) in toolbox.toml instead")
     if not defined:
         return {"": dict(cfg["sync"])}

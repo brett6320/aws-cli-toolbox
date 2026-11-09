@@ -330,7 +330,7 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
   profile has a comment line with the account name, ID, business domain
   (`ou`, or `Legacy`) and environment (`Lab`, `Sbx`, `Dev`, `Tst`, `Prd`, `Bil`).
 - **Roles:** one profile per role. The list is `roles` in `[sync]` (or per org),
-  else `BM_DEFAULT_ROLES`. `role_suffixes` maps each role to its suffix; a role
+  else `BG_DEFAULT_ROLES`. `role_suffixes` maps each role to its suffix; a role
   that isn't mapped gets `-<role name>`. Suffixes must be `""` or lowercase like
   `-ro`, and no two roles can share one:
 
@@ -379,15 +379,18 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
 - **Precedence:** command-line flags (`--ddb-table-arn`, `--ddb-profile`,
   `--ddb-role-name`, `--attr-*`, `--roles`, `--include-inactive`, `--profile`),
   then the org's `toolbox.toml` keys, then the bookmarks generator's
-  environment variables (`BM_DDB_TABLE_ARN`, `BM_DDB_PROFILE`,
-  `BM_DDB_ROLE_NAME`, `BM_ATTR_*`, `BM_DEFAULT_ROLES`, `BM_INCLUDE_INACTIVE`),
-  then defaults. With `[orgs.*]` tables, `BM_DDB_TABLE_ARN` and
-  `BM_DDB_PROFILE` are ignored, since a shell variable can't tell orgs apart. An
+  environment variables (`BG_DDB_TABLE_ARN`, `BG_DDB_PROFILE`,
+  `BG_DDB_ROLE_NAME`, `BG_ATTR_*`, `BG_DEFAULT_ROLES`, `BG_INCLUDE_INACTIVE`),
+  then defaults. With `[orgs.*]` tables, `BG_DDB_TABLE_ARN` and
+  `BG_DDB_PROFILE` are ignored, since a shell variable can't tell orgs apart. An
   empty or whitespace-only toml value counts as unset. With several orgs, the
   table flags need `--org NAME`.
 - **`env_file` was removed.** A `toolbox.toml` that still sets it is refused
-  with a message saying so. Move `BM_DDB_TABLE_ARN` to `ddb_table_arn`,
-  `BM_DDB_PROFILE` to `ddb_profile`, `BM_DEFAULT_ROLES` to `roles`, and so on.
+  with a message saying so. Move `BG_DDB_TABLE_ARN` to `ddb_table_arn`,
+  `BG_DDB_PROFILE` to `ddb_profile`, `BG_DEFAULT_ROLES` to `roles`, and so on.
+  Variables with the old `BM_` prefix (for example `BM_DDB_TABLE_ARN`) are
+  ignored, with a warning naming the `BG_` variable to use instead, matching
+  the bookmarks generator.
 - `source_profile` must be defined by hand outside the managed block and sign in
   at the org's portal. Each role in the list must trust it.
 - **A different source per role:** `role_source_profiles` (per org) chains the
@@ -467,7 +470,7 @@ generated profiles, the least-privileged role is tried first.
 
 | Setting | Where | What it does |
 |---|---|---|
-| `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BM_DEFAULT_ROLES`. |
+| `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BG_DEFAULT_ROLES`. |
 | `role_suffixes` | `[sync]` or per org | Role → profile-name suffix. `""` means no suffix (only one role can have it). Otherwise lowercase `-x`, `-x-y`, and so on. Suffixes must be unique. A role with no entry gets `-<role name>`, lowercased and made safe for a profile name. |
 | `source_profile` | per org (or `[sync]` when there are no `[orgs.*]`) | The default first hop, used for every role not in `role_source_profiles`. Setting it switches the org to assume-role mode. |
 | `role_source_profiles` | per org (or `[sync]` when there are no `[orgs.*]`); never inherited | Role → first-hop profile. This is how each second-hop role gets its matching first hop. |

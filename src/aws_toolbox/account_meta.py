@@ -1,7 +1,7 @@
 """Account list and metadata, shared with the switch-role bookmarks generator.
 
 Ported from its aws_bookmarks.py (sha256 0b78c68a3789…),
-which isn't an installable package. Keep the two in step: same BM_* keys, same
+which isn't an installable package. Keep the two in step: same BG_* keys, same
 defaults, same normalization. Deliberate differences, all marked "differs:":
   - no .env file: settings come from toolbox.toml (passed in as kwargs), then
     the environment, so each org can have its own table in one run;
@@ -55,15 +55,15 @@ TABLE_ARN_RE = re.compile(
 SETTINGS = {
     "profile": ("AWS_PROFILE", None),
     "region": ("AWS_REGION", "us-east-1"),
-    "ddb_table_arn": ("BM_DDB_TABLE_ARN", None),
-    "ddb_profile": ("BM_DDB_PROFILE", None),
-    "ddb_role_name": ("BM_DDB_ROLE_NAME", "OrganizationAccountAccessRole"),
-    "attr_account_id": ("BM_ATTR_ACCOUNT_ID", "accountNumber"),
-    "attr_short_name": ("BM_ATTR_SHORT_NAME", "accountShortCode"),
-    "attr_ou": ("BM_ATTR_OU", "ou"),
-    "attr_environment": ("BM_ATTR_ENVIRONMENT", "environment"),
-    "roles": ("BM_DEFAULT_ROLES", "ReadOnly,Administrator"),
-    "include_inactive": ("BM_INCLUDE_INACTIVE", "false"),
+    "ddb_table_arn": ("BG_DDB_TABLE_ARN", None),
+    "ddb_profile": ("BG_DDB_PROFILE", None),
+    "ddb_role_name": ("BG_DDB_ROLE_NAME", "OrganizationAccountAccessRole"),
+    "attr_account_id": ("BG_ATTR_ACCOUNT_ID", "accountNumber"),
+    "attr_short_name": ("BG_ATTR_SHORT_NAME", "accountShortCode"),
+    "attr_ou": ("BG_ATTR_OU", "ou"),
+    "attr_environment": ("BG_ATTR_ENVIRONMENT", "environment"),
+    "roles": ("BG_DEFAULT_ROLES", "ReadOnly,Administrator"),
+    "include_inactive": ("BG_INCLUDE_INACTIVE", "false"),
 }
 
 
@@ -79,6 +79,12 @@ def resolve_settings(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(kwargs) - set(SETTINGS)
     if unknown:
         raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
+    # settings were prefixed BM_ before; they're ignored now, so say so
+    legacy = sorted(k for k in os.environ
+                    if k.startswith("BM_") and "BG_" + k[3:] in {v for v, _ in SETTINGS.values()})
+    if legacy:
+        log.warning("Ignoring %s: settings are now prefixed BG_ (rename to %s)",
+                    ", ".join(legacy), ", ".join("BG_" + k[3:] for k in legacy))
     cfg: dict[str, Any] = {}
     for key, (env_var, default) in SETTINGS.items():
         value = kwargs.get(key)
@@ -199,7 +205,7 @@ def get_ddb_session(cfg: Mapping[str, Any], org_session: boto3.Session) -> boto3
     actual = _caller_account(session)
     if actual != account:
         raise RuntimeError(f"DynamoDB credentials are for account {actual}, but the table is in {account}; "
-                           "fix --ddb-profile / BM_DDB_PROFILE")
+                           "fix --ddb-profile / BG_DDB_PROFILE")
     return session
 
 

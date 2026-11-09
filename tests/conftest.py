@@ -15,7 +15,7 @@ def isolated_aws(tmp_path, monkeypatch):
     monkeypatch.delenv("AWS_TOOLBOX_CONFIG", raising=False)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
-    for var in [v for v in os.environ if v.startswith("BM_")]:
+    for var in [v for v in os.environ if v.startswith(("BG_", "BM_"))]:
         monkeypatch.delenv(var)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
