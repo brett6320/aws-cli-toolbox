@@ -288,8 +288,8 @@ profile_prefix = "globex-"
 
 #### Assume-role profiles from the account-mapping table
 
-Set `source_profile` on an org to generate role-chained profiles instead of SSO
-ones. It follows the same conventions as the switch-role bookmarks generator.
+Set `source_profile` and/or `role_source_profiles` on an org to generate
+role-chained profiles instead of SSO ones. It follows the same conventions as the switch-role bookmarks generator.
 Everything is set in `toolbox.toml`; no `.env` file is read:
 
 ```toml
@@ -472,7 +472,7 @@ generated profiles, the least-privileged role is tried first.
 |---|---|---|
 | `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BG_DEFAULT_ROLES`. |
 | `role_suffixes` | `[sync]` or per org | Role → profile-name suffix. `""` means no suffix (only one role can have it). Otherwise lowercase `-x`, `-x-y`, and so on. Suffixes must be unique. A role with no entry gets `-<role name>`, lowercased and made safe for a profile name. |
-| `source_profile` | per org (or `[sync]` when there are no `[orgs.*]`) | The default first hop, used for every role not in `role_source_profiles`. Setting it switches the org to assume-role mode. |
+| `source_profile` | per org (or `[sync]` when there are no `[orgs.*]`) | The default first hop, used for every role not in `role_source_profiles`. Optional when `role_source_profiles` lists every role. Setting either key switches the org to assume-role mode. |
 | `role_source_profiles` | per org (or `[sync]` when there are no `[orgs.*]`); never inherited | Role → first-hop profile. This is how each second-hop role gets its matching first hop. |
 
 An org's own `roles` or `role_suffixes` replaces the `[sync]` value as a
@@ -488,7 +488,8 @@ whole; the two are not merged.
   `role_source_profiles`, and in AWS update the first hop's inline policy and
   the trust policy. A `role_suffixes` or `role_source_profiles` key that names
   no role is ignored when profiles are built, so a missed key quietly falls
-  back to `-<role name>` or to `source_profile`. Check the dry-run diff. Every
+  back to `-<role name>` or to `source_profile` (or, with no `source_profile`,
+  stops the run). Check the dry-run diff. Every
   `role_source_profiles` value is still checked, though: if a stale key points
   at a profile you've deleted, the run stops. Remove stale keys.
 - **Change a suffix:** edit `role_suffixes` and rerun. Profiles with the old
@@ -616,7 +617,7 @@ is left as it was, the other orgs are still written, and the command exits 1.
 How profiles are named depends on the org:
 - **SSO orgs:** each active account gets `<name>` (`readonly_role`) and
   `<name>-adm` (`admin_role`).
-- **Assume-role orgs (`source_profile` set):** each account gets one profile per
+- **Assume-role orgs (`source_profile` or `role_source_profiles` set):** each account gets one profile per
   entry in `roles`, named `<prefix><short name><suffix>`. See
   [Role conventions](#role-conventions-and-how-to-customize-them).
 

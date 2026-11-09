@@ -553,3 +553,27 @@ def test_legacy_bm_variables_are_ignored_with_a_warning(monkeypatch, caplog):
     cfg = account_meta.resolve_settings({})
     assert cfg["ddb_table_arn"] is None
     assert "Ignoring BM_DDB_TABLE_ARN: settings are now prefixed BG_ (rename to BG_DDB_TABLE_ARN)" in caplog.text
+
+
+def test_source_profile_optional_when_every_role_has_one(isolated_aws):
+    roles = {"roles": ["Platform-Admin", "Account-Admin"],
+             "role_suffixes": {"Platform-Admin": "", "Account-Admin": "-adm"}}
+    org = config.orgs(_role_cfg(source_profile="", **roles,
+                                role_source_profiles={"Platform-Admin": "corp-src", "Account-Admin": "corp-adm"}))[""]
+    assert sync_profiles.assume_role_mode(org)
+    settings = sync_profiles.meta_settings(org, _args())
+    assert settings["roles"] == ["Platform-Admin", "Account-Admin"]
+    accounts = [{"id": "111111111111", "name": "Net", "shortName": "net", "domain": "Core", "env": None}]
+    parser = configparser.RawConfigParser()
+    parser.read_string(sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                                      settings["role_suffixes"], "aws", reserved=set()))
+    assert parser["profile corp-net"]["source_profile"] == "corp-src"
+    assert parser["profile corp-net-adm"]["source_profile"] == "corp-adm"
+
+    bad = config.orgs(_role_cfg(source_profile="", **roles, role_source_profiles="corp-adm"))[""]
+    with pytest.raises(ValueError, match="must be a table"):
+        sync_profiles.meta_settings(bad, _args())
+
+    org = config.orgs(_role_cfg(source_profile="", **roles, role_source_profiles={"Account-Admin": "corp-adm"}))[""]
+    with pytest.raises(ValueError, match="no source_profile for role.s. Platform-Admin"):
+        sync_profiles.meta_settings(org, _args())

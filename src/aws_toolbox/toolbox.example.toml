@@ -59,7 +59,7 @@ exclude_accounts = []
 # profile_prefix = "globex-"
 # readonly_role = "ViewOnlyAccess"   # any [sync] key may be overridden per org
 #
-# Assume-role mode: set source_profile on an org. Accounts then come from the
+# Assume-role mode: set source_profile (and/or role_source_profiles) on an org. Accounts then come from the
 # org's OU tree, short names / business domains / environments from the
 # account-mapping DynamoDB table, and each account gets one profile per role,
 # `<prefix><short name>-<role>`, with role_arn + source_profile instead of SSO.
