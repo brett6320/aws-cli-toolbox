@@ -30,15 +30,15 @@ def test_normalize_env(raw, env):
 
 
 def test_resolve_settings_precedence_and_arn(monkeypatch):
-    for var, value in (("BM_DDB_TABLE_ARN", TABLE_ARN), ("BM_DEFAULT_ROLES", "ReadOnly, Administrator"),
-                       ("BM_ATTR_OU", "businessDomain"), ("AWS_REGION", "us-east-2")):
+    for var, value in (("BG_DDB_TABLE_ARN", TABLE_ARN), ("BG_DEFAULT_ROLES", "ReadOnly, Administrator"),
+                       ("BG_ATTR_OU", "businessDomain"), ("AWS_REGION", "us-east-2")):
         monkeypatch.setenv(var, value)
     s = account_meta.resolve_settings({"roles": "Admin"})
     assert s["roles"] == ["Admin"]  # kwargs beat the environment
     assert s["attr_ou"] == "businessDomain"
     assert (s["ddb_table"], s["ddb_account_id"], s["ddb_region"]) == ("account-mapping", "123456789012", "us-east-1")
     assert s["region"] == "us-east-2" and s["include_inactive"] is False
-    monkeypatch.delenv("BM_DDB_TABLE_ARN")
+    monkeypatch.delenv("BG_DDB_TABLE_ARN")
     none = account_meta.resolve_settings({})  # no table: optional, names come from accounts
     assert none["ddb_table"] is none["ddb_account_id"] is none["ddb_region"] is None
     with pytest.raises(ValueError, match="Not a DynamoDB table ARN"):
@@ -178,8 +178,8 @@ def test_table_keys_per_org_and_inherited_attrs():
 
 
 def test_meta_settings_named_org_ignores_table_env(isolated_aws, monkeypatch):
-    monkeypatch.setenv("BM_DDB_TABLE_ARN", TABLE_ARN)
-    monkeypatch.setenv("BM_DDB_PROFILE", "someone-elses")
+    monkeypatch.setenv("BG_DDB_TABLE_ARN", TABLE_ARN)
+    monkeypatch.setenv("BG_DDB_PROFILE", "someone-elses")
     org = config.orgs(_role_cfg(ddb_table_arn="", ddb_profile=" "))[""]
     named = sync_profiles.meta_settings(org, _args(), "acme")
     assert named["ddb_table_arn"] == "" and named["ddb_table"] is None and named["ddb_profile"] == ""
@@ -468,9 +468,9 @@ def test_meta_settings_roles_list_or_string(isolated_aws, tmp_path, roles, expec
 
 
 def test_meta_settings_toml_beats_environment_beats_default(isolated_aws, monkeypatch):
-    monkeypatch.setenv("BM_ATTR_OU", "domain")
-    monkeypatch.setenv("BM_ATTR_SHORT_NAME", "code")
-    monkeypatch.setenv("BM_INCLUDE_INACTIVE", "true")
+    monkeypatch.setenv("BG_ATTR_OU", "domain")
+    monkeypatch.setenv("BG_ATTR_SHORT_NAME", "code")
+    monkeypatch.setenv("BG_INCLUDE_INACTIVE", "true")
     org = config.orgs(_role_cfg(attr_ou="businessDomain", include_inactive=False))[""]
     s = sync_profiles.meta_settings(org, _args())
     assert s["attr_ou"] == "businessDomain" and s["include_inactive"] is False  # toml
@@ -546,3 +546,10 @@ def test_role_source_profiles_per_role(isolated_aws, tmp_path):
     # undefined, or from another portal: refused before any AWS call
     assert sync_profiles.run(_args(), _role_cfg(role_source_profiles={"Account-Admin": "nope"})) == 2
     assert sync_profiles.run(_args(), _role_cfg(role_source_profiles={"Account-Admin": "other-adm"})) == 2
+
+
+def test_legacy_bm_variables_are_ignored_with_a_warning(monkeypatch, caplog):
+    monkeypatch.setenv("BM_DDB_TABLE_ARN", TABLE_ARN)
+    cfg = account_meta.resolve_settings({})
+    assert cfg["ddb_table_arn"] is None
+    assert "Ignoring BM_DDB_TABLE_ARN: settings are now prefixed BG_ (rename to BG_DDB_TABLE_ARN)" in caplog.text

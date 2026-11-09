@@ -43,22 +43,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", help="Override the org's management_profile (needs a single org)")
     parser.add_argument("--force", action="store_true", help="Write even if no accounts were found")
     meta = parser.add_argument_group("assume-role mode (override the org's toolbox.toml keys; need a single org)")
-    meta.add_argument("--ddb-table-arn", help="Account metadata table ARN (BM_DDB_TABLE_ARN)")
-    meta.add_argument("--ddb-profile", help="Profile for the table's account (BM_DDB_PROFILE)")
-    meta.add_argument("--ddb-role-name", help="Role assumed in the table's account (BM_DDB_ROLE_NAME)")
-    meta.add_argument("--attr-account-id", help="Table attribute: account number (BM_ATTR_ACCOUNT_ID)")
-    meta.add_argument("--attr-short-name", help="Table attribute: short name (BM_ATTR_SHORT_NAME)")
-    meta.add_argument("--attr-ou", help="Table attribute: business domain (BM_ATTR_OU)")
-    meta.add_argument("--attr-environment", help="Table attribute: environment (BM_ATTR_ENVIRONMENT)")
-    meta.add_argument("--roles", help="Comma-separated roles, one profile each (BM_DEFAULT_ROLES)")
+    meta.add_argument("--ddb-table-arn", help="Account metadata table ARN (BG_DDB_TABLE_ARN)")
+    meta.add_argument("--ddb-profile", help="Profile for the table's account (BG_DDB_PROFILE)")
+    meta.add_argument("--ddb-role-name", help="Role assumed in the table's account (BG_DDB_ROLE_NAME)")
+    meta.add_argument("--attr-account-id", help="Table attribute: account number (BG_ATTR_ACCOUNT_ID)")
+    meta.add_argument("--attr-short-name", help="Table attribute: short name (BG_ATTR_SHORT_NAME)")
+    meta.add_argument("--attr-ou", help="Table attribute: business domain (BG_ATTR_OU)")
+    meta.add_argument("--attr-environment", help="Table attribute: environment (BG_ATTR_ENVIRONMENT)")
+    meta.add_argument("--roles", help="Comma-separated roles, one profile each (BG_DEFAULT_ROLES)")
     meta.add_argument("--include-inactive", action="store_const", const=True,
-                      help="Include suspended/closed accounts (BM_INCLUDE_INACTIVE)")
+                      help="Include suspended/closed accounts (BG_INCLUDE_INACTIVE)")
 
 
 # Flags that map straight onto account_meta settings.
 META_FLAGS = ("ddb_table_arn", "ddb_profile", "ddb_role_name", "attr_account_id", "attr_short_name",
               "attr_ou", "attr_environment", "roles", "include_inactive")
-# toolbox.toml keys with the same names; unset ones fall back to BM_* variables.
+# toolbox.toml keys with the same names; unset ones fall back to BG_* variables.
 PER_ORG_TABLE_KEYS = ("ddb_table_arn", "ddb_profile")
 META_TOML_KEYS = ("ddb_table_arn", "ddb_profile", "ddb_role_name", "attr_account_id", "attr_short_name",
                   "attr_ou", "attr_environment", "include_inactive")
@@ -293,7 +293,7 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
     """account_meta settings for an assume-role org: flags > toml > environment > defaults.
 
     With [orgs.*] tables (`name` set), the table and its profile come only from
-    the org's own keys or flags: a BM_DDB_TABLE_ARN in the shell belongs to one org.
+    the org's own keys or flags: a BG_DDB_TABLE_ARN in the shell belongs to one org.
     """
     kwargs = {k: getattr(args, k) for k in META_FLAGS if getattr(args, k, None) is not None}
     for key in META_TOML_KEYS:
@@ -323,7 +323,7 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
         kwargs["profile"] = args.profile or org["management_profile"]
     settings = account_meta.resolve_settings(kwargs)
     if not settings["roles"]:
-        raise ValueError("no roles configured (roles, BM_DEFAULT_ROLES or --roles)")
+        raise ValueError("no roles configured (roles, BG_DEFAULT_ROLES or --roles)")
     settings["role_suffixes"] = role_suffixes(settings["roles"], org["role_suffixes"])
     if not isinstance(org["require_short_name"], bool):
         raise ValueError("require_short_name must be true or false")
@@ -364,8 +364,8 @@ class TableError(Exception):
 def read_table(name: str, s: dict, org_session, text: str) -> tuple[dict, set[str]] | None:
     """Scan the metadata table, or None if no credentials have access to it.
 
-    Tries the configured access (BM_DDB_PROFILE, the org profile, or
-    BM_DDB_ROLE_NAME), then each of this org's own generated profiles for the
+    Tries the configured access (BG_DDB_PROFILE, the org profile, or
+    BG_DDB_ROLE_NAME), then each of this org's own generated profiles for the
     table's account. That second path is how a first run without table access
     is backfilled: run 1 generates the profiles, run 2 reads the table with
     them. Raises TableError for anything that isn't an access failure.
@@ -445,8 +445,8 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     if table is not None:
         matched = sum(1 for a in accounts if a["hasMetadata"])
         if accounts and not matched and not args.force:
-            # Wrong table/BM_ATTR_* names would otherwise rename every profile.
-            log.error("%s: no account matched a row in %s; check BM_DDB_TABLE_ARN and BM_ATTR_* "
+            # Wrong table/BG_ATTR_* names would otherwise rename every profile.
+            log.error("%s: no account matched a row in %s; check BG_DDB_TABLE_ARN and BG_ATTR_* "
                       "(use --force to generate names from account names)", _label(name), s["ddb_table"])
             return None
         if org["require_short_name"]:
