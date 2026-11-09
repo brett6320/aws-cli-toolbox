@@ -3,11 +3,12 @@
 SSO mode (default): each active account gets `<name>` (read-only role) and
 `<name><admin_suffix>` (privileged role) as SSO profiles.
 
-Assume-role mode (org sets source_profile): accounts come from the org tree,
-short names, business domains and environments from the account-mapping
-DynamoDB table (same .env keys as the switch-role bookmarks generator), and each
-account gets one `<short name>-<role>` profile per role, chained from
-source_profile with role_arn.
+Assume-role mode (org sets source_profile and/or role_source_profiles):
+accounts come from the org tree, short names, business domains and environments
+from the account-mapping DynamoDB table (same settings as the switch-role
+bookmarks generator), and each account gets one `<short name>-<role>` profile
+per role, chained with role_arn from the role's entry in role_source_profiles,
+else from source_profile.
 
 Each org's profiles are written to its own marked block in ~/.aws/config;
 everything outside those blocks is left untouched. Read-only against AWS.
@@ -144,10 +145,10 @@ def _comment_text(value) -> str:
 
 def build_role_block(accounts: list[dict], org: dict, defaults: dict, roles: list[tuple[str, str]],
                      partition: str, reserved: set[str]) -> str:
-    """Assume-role profiles: one per (account, role), chained from org["source_profile"].
+    """Assume-role profiles: one per (account, role), chained from org["source_profile"]
+    or, for a role listed in org["role_source_profiles"], from that profile.
 
-    `roles` is [(role name, profile-name suffix)] from role_suffixes(). A role
-    listed in org["role_source_profiles"] chains from that profile instead.
+    `roles` is [(role name, profile-name suffix)] from role_suffixes().
     """
     sources = org.get("role_source_profiles") or {}
     excluded = {str(a) for a in org["exclude_accounts"]}
@@ -265,8 +266,6 @@ def _check_org(name: str, org: dict, text: str, profile: str | None) -> str | No
     role_sources = org["role_source_profiles"]
     if not isinstance(role_sources, dict) or not all(isinstance(v, str) and v for v in role_sources.values()):
         return 'role_source_profiles must be a table of role = "profile"'
-    if role_sources and not org["source_profile"]:
-        return "role_source_profiles needs source_profile (assume-role mode)"
     sources = [("source_profile", org["source_profile"])] if org["source_profile"] else []
     sources += [(f"role_source_profiles.{role}", prof) for role, prof in role_sources.items()]
     for key, source in sources:
@@ -287,6 +286,10 @@ def _check_org(name: str, org: dict, text: str, profile: str | None) -> str | No
     if mgmt_url != url:
         return f"management profile {profile} signs in at {mgmt_url}, not this org's portal {url}"
     return None
+
+
+def assume_role_mode(org: dict) -> bool:
+    return bool(org["source_profile"] or org["role_source_profiles"])
 
 
 def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
@@ -325,6 +328,13 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
     if not settings["roles"]:
         raise ValueError("no roles configured (roles, BG_DEFAULT_ROLES or --roles)")
     settings["role_suffixes"] = role_suffixes(settings["roles"], org["role_suffixes"])
+    if not isinstance(org["role_source_profiles"], dict):
+        raise ValueError('role_source_profiles must be a table of role = "profile"')
+    if not org["source_profile"]:
+        unmapped = [r for r in settings["roles"] if r not in org["role_source_profiles"]]
+        if unmapped:
+            raise ValueError(f"no source_profile for role(s) {', '.join(unmapped)}; "
+                             "set source_profile or add them to role_source_profiles")
     if not isinstance(org["require_short_name"], bool):
         raise ValueError("require_short_name must be true or false")
     if not isinstance(org["account_name_aliases"], bool):
@@ -512,12 +522,12 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
     if meta_flags and len(selected) != 1:
         log.error("%s need exactly one org; add --org NAME", ", ".join(meta_flags))
         return 2
-    if meta_flags and not orgs[selected[0]]["source_profile"]:
-        log.error("%s only apply to an org with source_profile set", ", ".join(meta_flags))
+    if meta_flags and not assume_role_mode(orgs[selected[0]]):
+        log.error("%s only apply to an org with source_profile or role_source_profiles set", ", ".join(meta_flags))
         return 2
     settings = {}
     for name in selected:
-        if orgs[name]["source_profile"]:
+        if assume_role_mode(orgs[name]):
             try:
                 settings[name] = meta_settings(orgs[name], args, name)
             except (ValueError, TypeError) as e:

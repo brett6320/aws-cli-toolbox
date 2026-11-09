@@ -27,10 +27,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "admin_suffix": "-adm",
         "profile_prefix": "",
         "exclude_accounts": [],
-        # Assume-role mode (set source_profile): accounts come from the org tree,
+        # Assume-role mode (set source_profile and/or role_source_profiles):
+        # accounts come from the org tree,
         # short names/domains/environments from the account-mapping table at
-        # ddb_table_arn, and one role_arn profile per role, chained from
-        # source_profile. roles = [] means BG_DEFAULT_ROLES. role_suffixes maps a
+        # ddb_table_arn, and one role_arn profile per role, chained from the
+        # role's role_source_profiles entry, else source_profile. roles = [] means BG_DEFAULT_ROLES. role_suffixes maps a
         # role to its profile-name suffix ("" = none); unmapped roles get
         # "-<role name>".
         "source_profile": "",
@@ -53,7 +54,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # account (e.g. acme-ops and acme-operations). Short names win clashes.
         "account_name_aliases": False,
         # Per-role source profile, e.g. { "Admin" = "acme-billing-adm" }; roles
-        # not listed chain from source_profile. Per org, never inherited.
+        # not listed chain from source_profile, which may be left empty when
+        # every role is listed here. Per org, never inherited.
         "role_source_profiles": {},
     },
     "netskope": {
