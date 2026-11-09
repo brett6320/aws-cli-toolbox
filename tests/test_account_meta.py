@@ -172,7 +172,8 @@ def test_table_keys_per_org_and_inherited_attrs():
     assert orgs["acme"]["attr_ou"] == "domain" and orgs["acme"]["include_inactive"] is True  # shared
     assert orgs["globex"]["attr_ou"] == "bu"                                                # overridden
     assert orgs["acme"]["ddb_table_arn"] == TABLE_ARN and orgs["globex"]["ddb_table_arn"] == ""
-    per_org = {"ddb_table_arn": "x", "ddb_profile": "x", "source_profile": "x", "role_source_profiles": {"R": "x"}}
+    per_org = {"ddb_table_arn": "x", "ddb_profile": "x", "source_profile": "x", "role_source_profiles": {"R": "x"},
+               "short_names": {"111111111111": "x"}}
     for key, value in per_org.items():  # per org only: a [sync] value would be ignored
         with pytest.raises(ValueError, match=f"\\[sync\\] {key} isn't used"):
             config.orgs({**cfg, "sync": {**cfg["sync"], key: value}})
@@ -588,3 +589,57 @@ def test_roles_default_to_role_source_profiles(isolated_aws, monkeypatch):
     monkeypatch.setenv("BG_DEFAULT_ROLES", "Account-Admin")
     assert sync_profiles.meta_settings(org, _args())["roles"] == ["Account-Admin"]
     assert sync_profiles.meta_settings(org, _args(roles="Platform-Admin"))["roles"] == ["Platform-Admin"]
+
+
+def test_short_names_override_the_table_and_skip_prefix_handling():
+    org = {"exclude_accounts": [], "profile_prefix": "bm-", "source_profile": "bm-src",
+           "short_names": {"111111111111": "bm-core", "222222222222": "billing"}}
+    accounts = [
+        {"id": "111111111111", "name": "Operations", "shortName": "ops", "domain": "Core", "env": "Prd"},
+        {"id": "222222222222", "name": "Payments", "shortName": "Payments", "domain": "Legacy", "env": None},
+    ]
+    sync_profiles.apply_short_names(accounts, org)
+    roles = sync_profiles.role_suffixes(["ReadOnly"], USER_SUFFIXES)
+    block = sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                           roles, "aws", reserved=set())
+    names = configparser.RawConfigParser()
+    names.read_string(block)
+    # used as written after the prefix, even when it starts like the prefix
+    assert names.sections() == ["profile bm-billing-ro", "profile bm-bm-core-ro"]
+    assert names["profile bm-billing-ro"]["role_arn"] == "arn:aws:iam::222222222222:role/ReadOnly"
+
+
+@pytest.mark.parametrize("value, err", [
+    ([], "must be a table"),
+    ({"1111": "x"}, "12-digit"),
+    ({"111111111111": "Bad Name"}, "lowercase"),
+    ({"111111111111": "-x"}, "lowercase"),
+    ({"111111111111": "core\n"}, "lowercase"),
+    ({"111111111111\n": "core"}, "12-digit"),
+    ({"111111111111": "core", "222222222222": "core"}, "both use 'core'"),
+])
+def test_short_names_validation(value, err):
+    assert err in sync_profiles.short_name_error({"short_names": value})
+    assert sync_profiles.short_name_error({"short_names": {"111111111111": "ok-1"}}) is None
+
+
+@mock_aws
+def test_sync_short_names_rescue_duplicate_rows_and_warn_unknown(isolated_aws, caplog):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    twice = org.create_account(AccountName="Twice", Email="t@example.com")["CreateAccountStatus"]["AccountId"]
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, short in enumerate(("tw1", "tw2")):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": twice}, "accountShortCode": {"S": short}})
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"},
+                    short_names={twice: "pinned", "999999999999": "gone"})
+    assert sync_profiles.run(_args(execute=True, force=True), cfg) == 0
+    text = path.read_text()
+    assert f"[profile corp-pinned-ro]\nrole_arn = arn:aws:iam::{twice}:role/ReadOnly" in text
+    assert "short_names for 999999999999 match no active account" in caplog.text

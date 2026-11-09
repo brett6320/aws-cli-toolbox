@@ -375,3 +375,11 @@ def test_sync_accepts_role_chained_from_org_portal(isolated_aws):
     args = argparse.Namespace(execute=False, apply=False, org=["globex"], profile="globex-chain", force=False)
     with patches[0], patches[1], patches[2]:
         assert sync_profiles.run(args, _multi_org_cfg()) == 0
+
+
+def test_build_block_short_names():
+    cfg = _cfg(sync={"sso_start_url": "https://x/start", "profile_prefix": "acme-",
+                     "short_names": {"111111111111": "core"}})
+    accounts = [{"id": "111111111111", "name": "Core Networking"}, {"id": "222222222222", "name": "Dev"}]
+    assert _names(sync_profiles.build_block(accounts, cfg["sync"], cfg["defaults"], reserved=set())) == [
+        "acme-core", "acme-core-adm", "acme-dev", "acme-dev-adm"]
