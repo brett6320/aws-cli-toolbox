@@ -198,3 +198,33 @@ def test_sso_refresh_manual_login_never_opens_browser_and_goes_last(isolated_aws
     assert sso_refresh.run(args, cfg) == 0
     assert [c[4] for c in calls] == ["Platform-RO", "Platform-ADM", "globex-ro"]
     assert "--no-browser" not in calls[1]
+
+
+def test_sso_refresh_manual_login_session_pattern_and_bad_type(isolated_aws, monkeypatch, caplog):
+    import argparse
+    from aws_toolbox import config
+    from aws_toolbox.commands import sso_refresh
+    (isolated_aws / "config").write_text(
+        "[sso-session main-org]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[sso-session main-org-adm]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[profile admin]\nsso_session = main-org-adm\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        "[profile Shared-ADM]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        "[profile ro]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = ReadOnly\n")
+    cfg = config.load()
+    cfg["sso"]["main_profile"] = "ro"
+    cfg["sso"]["manual_login"] = "*-adm"  # a bare string is one pattern, not one per character
+    calls = []
+    monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
+    assert sso_refresh.run(args, cfg) == 0
+    assert calls == [
+        ["/usr/bin/aws", "sso", "login", "--profile", "ro"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "admin", "--no-browser"],
+    ]
+    cfg["sso"]["manual_login"] = ["*-ADM"]
+    sso_refresh.run(args, cfg)
+    assert "Shared-ADM match manual_login but share main-org's token" in caplog.text
+    cfg["sso"]["manual_login"] = [1]
+    assert sso_refresh.run(args, cfg) == 2

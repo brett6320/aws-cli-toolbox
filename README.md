@@ -621,11 +621,12 @@ in the browser profile or container for that org. An org that uses
 before its first sync. An org configured with `sso_start_url` needs at least one
 profile first.
 
-`sso.manual_login` lists profile (or sso-session) name patterns, such as
-`["*-ADM"]`. Their logins never open the browser, even on the main start URL:
+`sso.manual_login` lists case-sensitive patterns matched against profile and
+sso-session names, such as `["*-ADM"]`. Their logins never open the browser, even on the main start URL:
 the CLI prints the URL and code and waits until you finish. They run after all
 the other logins. One token covers every profile on the same `sso_session`, so a
-pattern only takes effect when every profile sharing that token matches it.
+pattern only takes effect when every profile sharing that token matches it
+(a warning says so otherwise); matching the session name covers them all.
 `--manual-login PATTERN` (repeatable) overrides the setting for one run, and
 `--list` marks these targets `M`.
 

@@ -33,12 +33,15 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--main-profile", help="Override [sso] main_org/main_profile with a profile")
     parser.add_argument("--list", action="store_true", help="List login targets and token status, then exit")
     parser.add_argument("--manual-login", action="append", metavar="PATTERN",
-                        help="Override [sso] manual_login: targets matching PATTERN (e.g. '*-ADM') "
-                             "print a URL instead of opening the browser, and go last. Repeatable")
+                        help="Override [sso] manual_login: profiles or sso-sessions matching PATTERN "
+                             "(case-sensitive, e.g. '*-ADM') print a URL instead of opening the browser, "
+                             "and go last. Repeatable")
 
 
 def is_manual(profile: awsconfig.SsoProfile, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatchcase(profile.name, pat) for pat in patterns)
+    """True if the profile's name or its sso-session's name matches a pattern."""
+    names = [n for n in (profile.name, profile.session) if n]
+    return any(fnmatch.fnmatchcase(n, pat) for n in names for pat in patterns)
 
 
 def plan_logins(
@@ -66,6 +69,12 @@ def plan_logins(
         if p.cache_key not in by_key or (is_manual(by_key[p.cache_key], manual) and not is_manual(p, manual)):
             by_key[p.cache_key] = p
     targets = list(by_key.values())
+    for t in targets:
+        shared = [p.name for p in profiles if p.cache_key == t.cache_key and is_manual(p, manual)]
+        if shared and not is_manual(t, manual):
+            log.warning("%s match manual_login but share %s's token with %s, so they log in with it; "
+                        "give them their own [sso-session] to log in separately",
+                        ", ".join(shared), t.cache_key, t.name)
     if main_url:
         main_url = main_url.rstrip("/")
     # Main URL's logins open the browser; keep them ahead of the rest, and
@@ -129,7 +138,12 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
         return 2
     profiles = awsconfig.sso_profiles(parser)
     profiles += org_session_targets(parser, orgs, profiles)
-    manual = args.manual_login or list(cfg["sso"]["manual_login"])
+    manual = args.manual_login or cfg["sso"]["manual_login"]
+    if isinstance(manual, str):
+        manual = [manual]
+    if not isinstance(manual, list) or not all(isinstance(m, str) for m in manual):
+        log.error("%s: [sso] manual_login must be a list of name patterns", config.config_path())
+        return 2
     main_org = args.main_org or cfg["sso"]["main_org"]
     if args.main_profile or not main_org:
         targets, main_url = plan_logins(profiles, main_profile=args.main_profile or cfg["sso"]["main_profile"],
