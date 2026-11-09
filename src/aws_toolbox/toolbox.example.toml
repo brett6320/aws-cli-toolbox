@@ -37,7 +37,7 @@ sso_region = "us-east-1"
 readonly_role = "ReadOnlyAccess"
 admin_role = "AdministratorAccess"
 admin_suffix = "-adm"
-profile_prefix = ""
+profile_prefix = ""             # not repeated when a name already starts with it
 # Account IDs to leave out of generated profiles.
 exclude_accounts = []
 
