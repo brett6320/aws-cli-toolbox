@@ -3,7 +3,9 @@
 # never from the working tree. Dry-run unless --execute.
 #
 #   1. snapshot the ref with `git archive` into a temp dir
-#   2. console scripts: non-editable `uv tool install` from the snapshot
+#   2. console scripts, for this user only (no sudo, never the system Python):
+#      non-editable `uv tool install` from the snapshot, or without uv, a
+#      private venv under ~/.local/share/aws-cli-toolbox with pip
 #   3. retire older ~/.functions.d/*.functions files the toolbox supersedes
 #      (names in shell/replaces.txt)
 #   4. copy shell/aws-toolbox.functions to ~/.functions.d/ (copied, not
@@ -19,15 +21,21 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: install.sh [--execute|--apply] [--status] [--ref REF] [--repo DIR] [--force]
-  --execute     apply changes (default: dry-run)
-  --status      show installed commit vs REF and exit (changes nothing)
-  --ref REF     git ref to install (default: git config aws-toolbox.ref, else main)
-  --repo DIR    repository to install from (default: this script's directory)
-  --force       reinstall console scripts even if REF is already installed
+                  [--installer auto|uv|pip] [--index-url URL] [--system-certs]
+  --execute       apply changes (default: dry-run)
+  --status        show installed commit vs REF and exit (changes nothing)
+  --ref REF       git ref to install (default: git config aws-toolbox.ref, else main)
+  --repo DIR      repository to install from (default: this script's directory)
+  --force         reinstall console scripts even if REF is already installed
+  --installer X   uv (uv tool install), pip (private venv + pip), or auto:
+                  uv if it's on PATH, else pip (default: auto)
+  --index-url URL package index to install from, e.g. a company mirror of PyPI
+                  (default: uv's own setting, else pip's configured index-url)
+  --system-certs  trust the OS certificate store (for TLS-inspecting proxies)
 EOF
 }
 
-execute=0 force=0 status=0 ref="" repo=""
+execute=0 force=0 status=0 ref="" repo="" installer=auto index_url="" system_certs=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --execute|--apply) execute=1 ;;
@@ -35,11 +43,20 @@ while [ $# -gt 0 ]; do
     --status) status=1 ;;
     --ref) ref="${2:?--ref needs a value}"; shift ;;
     --repo) repo="${2:?--repo needs a value}"; shift ;;
+    --installer) installer="${2:?--installer needs a value}"; shift ;;
+    --index-url) index_url="${2:?--index-url needs a value}"; shift ;;
+    --system-certs) system_certs=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift
 done
+
+case "$installer" in auto|uv|pip) ;; *) usage >&2; exit 2 ;; esac
+if [ "$(id -u)" = 0 ]; then
+  echo "ERROR: run this as your own user, not root or sudo; everything installs under \$HOME" >&2
+  exit 1
+fi
 
 repo="$(cd "${repo:-$(dirname "$0")}" && pwd)"
 ref="${ref:-$(git -C "$repo" config aws-toolbox.ref 2>/dev/null || echo main)}"
@@ -48,6 +65,8 @@ backup_dir="$functions_dir/.backup"
 target="$functions_dir/aws-toolbox.functions"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/aws-cli-toolbox"
 state_file="$state_dir/installed"
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/aws-cli-toolbox"
+bin_dir="$HOME/.local/bin"
 ts="$(date +%Y%m%d%H%M%S)"
 restore=()
 
@@ -62,6 +81,19 @@ backup() {
   run mkdir -p "$dir"
   run cp -p "$file" "$dest"
   restore+=("cp -p '$dest' '$file'")
+}
+
+redact() { sed -E 's#://[^/@]*@#://***@#'; }  # hide user:token in index URLs
+
+# First python3.x on PATH that is 3.11+ (the package's requires-python).
+find_python() {
+  local c
+  for c in python3.13 python3.12 python3.11 python3; do
+    if command -v "$c" >/dev/null && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
 }
 
 defined_functions() {  # names of shell functions defined in FILE
@@ -99,14 +131,90 @@ echo "==> Installing $ref @ $short from $repo (snapshot, not the working tree)"
 
 # --- 1. console scripts ------------------------------------------------------
 echo "==> Console scripts"
+if [ "$installer" = auto ]; then
+  if command -v uv >/dev/null; then installer=uv; else installer=pip; fi
+fi
 if [ -n "${AWS_TOOLBOX_SKIP_UV:-}" ]; then
   say "skipping uv tool install (AWS_TOOLBOX_SKIP_UV set)"
 elif [ "$installed_commit" = "$commit" ] && (( ! force )); then
   echo "    already at $short (use --force to reinstall)"
 else
-  # Not editable: uv copies the package into its own tool env, so the
-  # snapshot (and the repo) can change or vanish afterwards.
-  run uv tool install --reinstall "$snap"
+  py="$(find_python || true)"
+  # uv doesn't read pip.conf, and pip doesn't read uv's settings: find the
+  # index once and give it to both. Exported rather than passed as an
+  # argument so a token in the URL isn't printed.
+  if [ -z "$index_url" ]; then
+    index_url="${UV_DEFAULT_INDEX:-${UV_INDEX_URL:-${PIP_INDEX_URL:-}}}"
+  fi
+  if [ -z "$index_url" ] && [ -n "$py" ]; then
+    for key in global.index-url install.index-url; do
+      index_url="$("$py" -m pip config get "$key" 2>/dev/null || true)"
+      [ -n "$index_url" ] && break
+    done
+  fi
+  if [ -n "$index_url" ]; then
+    echo "    package index: $(echo "$index_url" | redact)"
+    export UV_DEFAULT_INDEX="$index_url" PIP_INDEX_URL="$index_url"
+  fi
+  if (( system_certs )); then
+    # UV_NATIVE_TLS for uv releases older than UV_SYSTEM_CERTS. The pip setting
+    # is an environment variable so pip's build-dependency subprocess gets it too.
+    export UV_SYSTEM_CERTS=1 UV_NATIVE_TLS=1
+  fi
+
+  # Switching installers: remove the other one's copy so the two don't fight
+  # over ~/.local/bin.
+  if [ "$installer" = uv ] && [ -d "$data_dir" ]; then
+    say "removing the pip install in $data_dir (switching to uv)"
+    run rm -rf "$data_dir"
+  elif [ "$installer" = pip ] && command -v uv >/dev/null && uv tool list 2>/dev/null | grep -q '^aws-cli-toolbox '; then
+    say "removing the uv tool install (switching to pip)"
+    run uv tool uninstall aws-cli-toolbox
+  fi
+
+  if [ "$installer" = uv ]; then
+    # Not editable: uv copies the package into its own tool env, so the
+    # snapshot (and the repo) can change or vanish afterwards. --force
+    # replaces commands left in ~/.local/bin by an earlier pip install.
+    run uv tool install --reinstall --force ${py:+--python "$py"} "$snap"
+  else
+    if [ -z "$py" ]; then
+      echo "ERROR: no Python 3.11+ on PATH (python3.13/3.12/3.11/python3); install one for your user, or install uv" >&2
+      exit 1
+    fi
+    if ! "$py" -c 'import ensurepip, venv' 2>/dev/null; then
+      echo "ERROR: $py can't create venvs (no ensurepip; e.g. Debian without python3-venv); install uv instead" >&2
+      exit 1
+    fi
+    if (( system_certs )); then
+      # pip 24.2+ trusts the OS store by default; 23.3+ needs the feature.
+      case "$("$py" -c 'import ensurepip as e; v = tuple(int(x) for x in e.version().split(".")[:2]); print("new" if v >= (24, 2) else "flag" if v >= (23, 3) else "old")')" in
+        flag) export PIP_USE_FEATURE=truststore ;;
+        old) echo "WARNING: $py bundles a pip too old for --system-certs; set PIP_CERT to a CA bundle instead" >&2 ;;
+      esac
+    fi
+    scripts="$(sed -n '/^\[project.scripts\]/,/^\[/s/^\([A-Za-z0-9_-]*\) *=.*/\1/p' "$snap/pyproject.toml")"
+    if [ -z "$scripts" ]; then
+      echo "ERROR: found no [project.scripts] in pyproject.toml" >&2
+      exit 1
+    fi
+    # A new venv every time, then repoint `current` and the command links, so
+    # a failed install leaves the previous one working.
+    name="$short.$ts"
+    venv="$data_dir/venvs/$name"
+    run "$py" -m venv "$venv"
+    run "$venv/bin/python" -m pip install --disable-pip-version-check "$snap"
+    run ln -sfn "venvs/$name" "$data_dir/current"
+    run mkdir -p "$bin_dir"
+    for s in $scripts; do
+      run ln -sf "$data_dir/current/bin/$s" "$bin_dir/$s"
+    done
+    if [ -d "$data_dir/venvs" ]; then
+      for old in "$data_dir"/venvs/*; do
+        [ "$old" = "$venv" ] || run rm -rf "$old"
+      done
+    fi
+  fi
 fi
 
 # --- 2. retire superseded functions files ------------------------------------
@@ -171,7 +279,7 @@ fi
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
-  *) echo "NOTE: add ~/.local/bin to PATH (uv tool's install location)" >&2 ;;
+  *) echo "NOTE: add ~/.local/bin to PATH (where the commands are installed)" >&2 ;;
 esac
 
 if (( ${#restore[@]} )); then

@@ -26,7 +26,7 @@ below covers each step in full.
 
 The JSON for both is under [AWS side, per tier](#aws-side-per-tier).
 
-1. **Install** (needs Python 3.11+, uv and AWS CLI v2):
+1. **Install** (needs Python 3.11+ and AWS CLI v2; uv is optional, and no admin rights are needed):
 
    ```bash
    git clone <repo-url> ~/Code/aws-cli-toolbox && cd ~/Code/aws-cli-toolbox
@@ -127,11 +127,16 @@ Do these steps once, in order. Steps 5–7 are the day-to-day loop afterwards.
 
 ```bash
 python3 --version   # needs 3.11+ (Homebrew python3.13 works; macOS system 3.9 does not)
-uv --version        # https://docs.astral.sh/uv/
+uv --version        # optional; https://docs.astral.sh/uv/
 aws --version       # AWS CLI v2, used by aws-sso-refresh
 ```
 
-`~/.local/bin` must be on your `PATH`, because that's where `uv tool` puts the commands.
+`~/.local/bin` must be on your `PATH`, because that's where the commands go.
+
+No admin rights are needed, and nothing is installed into the system Python.
+Everything goes under your home directory, and the installer refuses to run
+as root or under `sudo`. A Python 3.11+ that you can run is enough: uv, a
+user-level Homebrew, pyenv or a company-provided build all work.
 
 ### 2. Install
 
@@ -152,9 +157,18 @@ a different ref, pass `--ref <branch|tag|sha>`, or set it once with
 `install.sh` does four things:
 
 1. Installs the commands (`aws-toolbox`, `aws-sso-refresh`, `aws-sts-decode`,
-   `aws-sync-profiles`, `ns-cert-refresh`) with a regular, non-editable
-   `uv tool install` from the snapshot. uv copies them into its own tool
-   environment, so they don't depend on the repo afterwards.
+   `aws-sync-profiles`, `ns-cert-refresh`) into `~/.local/bin` from the
+   snapshot, so they don't depend on the repo afterwards:
+   - **with uv** (the default when `uv` is on `PATH`): a regular, non-editable
+     `uv tool install`, into uv's own tool environment;
+   - **without uv** (or `--installer pip`): a private venv under
+     `~/.local/share/aws-cli-toolbox/venvs/<commit>`, made with your Python
+     3.11+ and filled with pip, and links to its commands in `~/.local/bin`.
+     A failed install leaves the previous venv in use. The Python needs
+     `venv` support (on Debian and Ubuntu, `python3-venv`); without it, use uv.
+
+   Switching between the two (with `--installer` and `--force` at the same
+   commit) removes the other one's copy first.
 2. Retires older `~/.functions.d/*.functions` files whose functions the toolbox
    supersedes; the names are listed in [shell/replaces.txt](shell/replaces.txt).
    This matters because a shell function takes precedence over a command on
@@ -166,6 +180,23 @@ a different ref, pass `--ref <branch|tag|sha>`, or set it once with
    copied, not linked, because the rc loop uses `find -type f`, which skips
    symlinks.
 4. Writes a starter `~/.aws/toolbox.toml` if you don't already have one.
+
+**Company networks.** Two problems are common behind a corporate proxy:
+
+- **`invalid peer certificate: UnknownIssuer`:** the proxy inspects TLS
+  traffic with its own certificate authority. Add `--system-certs` so uv
+  and pip trust the OS certificate store, which has that authority.
+- **`403 Forbidden` from `pypi.org`:** public PyPI is blocked, and packages
+  must come from a company mirror (Artifactory, Nexus and similar). Pass it
+  with `--index-url https://…/simple`. Without the flag, the installer uses
+  uv's own setting (`UV_DEFAULT_INDEX` / `UV_INDEX_URL`) if one is set, else
+  `PIP_INDEX_URL`, else the `index-url` in your pip configuration. uv doesn't
+  read pip's configuration itself. A username or token in the URL is hidden
+  in the output.
+
+```bash
+./install.sh --execute --system-certs --index-url https://artifactory.example.com/api/pypi/pypi/simple
+```
 
 **Backups and rollback:** every existing file that's replaced or retired is
 first copied to `~/.functions.d/.backup/<name>.<YYYYmmddHHMMSS>.bak`. The
