@@ -41,7 +41,8 @@ def env(tmp_path):
             shutil.copy2(src, repo / rel)
     e = {**os.environ, **GIT_ENV, "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "TMPDIR": str(tmp_path),
          "FUNCTIONS_DIR": str(tmp_path / "fd"), "XDG_STATE_HOME": str(tmp_path / "state"),
-         "AWS_TOOLBOX_SKIP_UV": "1", "AWS_TOOLBOX_CONFIG": str(tmp_path / "toolbox.toml")}
+         "AWS_TOOLBOX_SKIP_UV": "1", "AWS_TOOLBOX_CONFIG": str(tmp_path / "toolbox.toml"),
+         "XDG_DATA_HOME": str(tmp_path / "data")}
     git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], env=e, check=True, capture_output=True, text=True)
     git("init", "-q", "-b", "main")
     git("add", "-A")
@@ -174,3 +175,56 @@ def test_uv_index_setting_is_shared_with_pip(env):
     out = _install_pkg(env, "--installer", "pip", UV_DEFAULT_INDEX="https://mirror.example/simple")
     assert out.returncode == 0, out.stderr
     assert "package index: https://mirror.example/simple" in out.stdout
+
+
+def test_uninstall_removes_only_unchanged_files_it_placed(env):
+    tmp = env[0]
+    fd = tmp / "fd"
+    (fd / "aws-shell.functions").write_text(OLD)
+    (fd / "other.functions").write_text("vid() { :; }\n")
+    assert _install(env, "--execute").returncode == 0
+
+    out = _install(env, "--uninstall")  # dry-run
+    assert out.returncode == 0, out.stderr
+    assert (fd / "aws-toolbox.functions").exists() and (tmp / "toolbox.toml").exists()
+    assert (tmp / "state").exists()
+
+    out = _install(env, "--uninstall", "--execute")
+    assert out.returncode == 0, out.stderr
+    assert not (fd / "aws-toolbox.functions").exists()
+    assert not (tmp / "toolbox.toml").exists()  # the untouched starter config
+    assert not (tmp / "state" / "aws-cli-toolbox").exists()
+    assert (fd / "other.functions").exists()
+    assert list((fd / ".backup").glob("aws-shell.functions.*.bak"))  # kept for restoring
+
+
+def test_uninstall_keeps_edited_files(env):
+    tmp = env[0]
+    assert _install(env, "--execute").returncode == 0
+    (tmp / "toolbox.toml").write_text("[sync]\nroles = ['Mine']\n")
+    with open(tmp / "fd" / "aws-toolbox.functions", "a") as fh:
+        fh.write("# my edit\n")
+    out = _install(env, "--uninstall", "--execute")
+    assert out.returncode == 0, out.stderr
+    assert (tmp / "toolbox.toml").read_text() == "[sync]\nroles = ['Mine']\n"
+    assert (tmp / "fd" / "aws-toolbox.functions").read_text().endswith("# my edit\n")
+    assert "leaving it" in out.stdout + out.stderr
+
+
+def test_uninstall_pip_install_leaves_other_commands(env):
+    tmp, repo, e, _ = env
+    home, data = tmp / "home", tmp / "data" / "aws-cli-toolbox"
+    (data / "venvs" / "abc" / "bin").mkdir(parents=True)
+    (data / "current").symlink_to("venvs/abc")
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "aws-sync-profiles").symlink_to(data / "current" / "bin" / "aws-sync-profiles")
+    (bin_dir / "other-tool").symlink_to("/usr/bin/true")
+    (bin_dir / "script").write_text("#!/bin/sh\n")
+    e = {k: v for k, v in e.items() if k != "AWS_TOOLBOX_SKIP_UV"}
+    e.update(HOME=str(home), PATH="/usr/bin:/bin")  # no uv: don't touch the real uv tools
+    out = subprocess.run(["/bin/bash", str(repo / "install.sh"), "--uninstall", "--execute"],
+                         capture_output=True, text=True, env=e)
+    assert out.returncode == 0, out.stderr
+    assert not data.exists()
+    assert sorted(p.name for p in bin_dir.iterdir()) == ["other-tool", "script"]
