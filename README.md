@@ -203,6 +203,23 @@ first copied to `~/.functions.d/.backup/<name>.<YYYYmmddHHMMSS>.bak`. The
 `.bak` suffix keeps the rc loop from sourcing it. The installer prints the
 exact `cp` commands to restore each one.
 
+**Uninstall:** `./install.sh --uninstall` shows what it would remove, and
+`./install.sh --uninstall --execute` removes it. It removes only what the
+installer put in place:
+
+- the commands: `uv tool uninstall aws-cli-toolbox`, or the pip venv under
+  `~/.local/share/aws-cli-toolbox` and only the `~/.local/bin` links that
+  point into it;
+- `~/.functions.d/aws-toolbox.functions` and the starter `~/.aws/toolbox.toml`,
+  but only if they're unchanged from the installed commit (an edited file is
+  left with a warning);
+- the install record in `~/.local/state/aws-cli-toolbox`.
+
+It leaves the profiles `aws-sync-profiles` wrote to `~/.aws/config` (delete the
+`# BEGIN/END aws-toolbox managed profiles` blocks by hand if you want them
+gone), the `~/.aws/config.bak-*` backups, and the installer's backups in
+`~/.functions.d/.backup/`, so retired files can still be restored.
+
 Open a new shell when it finishes.
 
 ### Keeping the install in sync

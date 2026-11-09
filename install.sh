@@ -22,6 +22,7 @@ usage() {
   cat <<'EOF'
 usage: install.sh [--execute|--apply] [--status] [--ref REF] [--repo DIR] [--force]
                   [--installer auto|uv|pip] [--index-url URL] [--system-certs]
+       install.sh --uninstall [--execute|--apply]
   --execute       apply changes (default: dry-run)
   --status        show installed commit vs REF and exit (changes nothing)
   --ref REF       git ref to install (default: git config aws-toolbox.ref, else main)
@@ -32,15 +33,17 @@ usage: install.sh [--execute|--apply] [--status] [--ref REF] [--repo DIR] [--for
   --index-url URL package index to install from, e.g. a company mirror of PyPI
                   (default: uv's own setting, else pip's configured index-url)
   --system-certs  trust the OS certificate store (for TLS-inspecting proxies)
+  --uninstall     remove only what this installer put in place (dry-run unless --execute)
 EOF
 }
 
-execute=0 force=0 status=0 ref="" repo="" installer=auto index_url="" system_certs=0
+execute=0 force=0 status=0 uninstall=0 ref="" repo="" installer=auto index_url="" system_certs=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --execute|--apply) execute=1 ;;
     --force) force=1 ;;
     --status) status=1 ;;
+    --uninstall) uninstall=1 ;;
     --ref) ref="${2:?--ref needs a value}"; shift ;;
     --repo) repo="${2:?--repo needs a value}"; shift ;;
     --installer) installer="${2:?--installer needs a value}"; shift ;;
@@ -96,9 +99,82 @@ find_python() {
   return 1
 }
 
+# Uninstall: remove only what this installer created, and only files that are
+# still as it wrote them. Everything else is left alone and reported.
+do_uninstall() {
+  local installed="" f link
+  [ -f "$state_file" ] && installed="$(cut -d' ' -f1 "$state_file")"
+  echo "==> Uninstalling aws-cli-toolbox${installed:+ (installed ${installed:0:12})}"
+
+  # Is FILE identical to PATH as of the installed commit? (no record: not ours)
+  ours() {
+    [ -n "$installed" ] && git -C "$repo" cat-file -e "$installed:$2" 2>/dev/null &&
+      cmp -s "$1" <(git -C "$repo" show "$installed:$2")
+  }
+
+  echo "==> Console scripts"
+  if [ -n "${AWS_TOOLBOX_SKIP_UV:-}" ]; then
+    say "skipping console scripts (AWS_TOOLBOX_SKIP_UV set)"
+  else
+    if command -v uv >/dev/null && uv tool list 2>/dev/null | grep -q '^aws-cli-toolbox '; then
+      run uv tool uninstall aws-cli-toolbox
+    fi
+    if [ -d "$data_dir" ]; then
+      # Only links that point into our venv; other files in ~/.local/bin stay.
+      for f in "$bin_dir"/*; do
+        [ -L "$f" ] || continue
+        link="$(readlink "$f")"
+        case "$link" in "$data_dir"/*) run rm "$f" ;; esac
+      done
+      run rm -rf "$data_dir"
+    fi
+  fi
+
+  echo "==> $target"
+  if [ ! -f "$target" ]; then
+    echo "    not present"
+  elif ours "$target" shell/aws-toolbox.functions; then
+    run rm "$target"
+  else
+    echo "    WARNING: differs from the installed copy (or no install record); leaving it" >&2
+  fi
+
+  config="${AWS_TOOLBOX_CONFIG:-$HOME/.aws/toolbox.toml}"
+  echo "==> $config"
+  if [ ! -f "$config" ]; then
+    echo "    not present"
+  elif ours "$config" src/aws_toolbox/toolbox.example.toml; then
+    run rm "$config"  # the untouched starter config
+  else
+    echo "    yours (edited or not written by the installer); leaving it"
+  fi
+
+  echo "==> $state_dir"
+  if [ -d "$state_dir" ]; then run rm -rf "$state_dir"; else echo "    not present"; fi
+
+  echo "==> Left in place"
+  echo "    - profiles aws-sync-profiles wrote to ~/.aws/config (between the"
+  echo "      '# BEGIN/END aws-toolbox managed profiles' lines; delete those blocks by hand)"
+  echo "    - ~/.aws/config.bak-* backups made by aws-sync-profiles"
+  if [ -d "$backup_dir" ] && ls "$backup_dir"/*.bak >/dev/null 2>&1; then
+    echo "    - backups of files the installer replaced or retired, in $backup_dir."
+    echo "      To restore one: cp -p '$backup_dir/<name>.<timestamp>.bak' '$functions_dir/<name>'"
+  fi
+  if (( execute )); then
+    echo "==> Uninstalled. Open a new shell."
+  else
+    echo "==> Dry-run only. Re-run with --uninstall --execute to apply."
+  fi
+}
+
 defined_functions() {  # names of shell functions defined in FILE
   sed -nE 's/^[[:space:]]*(function[[:space:]]+)?([A-Za-z0-9_][A-Za-z0-9_-]*)[[:space:]]*\(\).*/\2/p' "$1" | sort -u
 }
+
+if (( uninstall )); then
+  do_uninstall
+  exit 0
+fi
 
 # --- 0. resolve the ref ------------------------------------------------------
 if ! commit="$(git -C "$repo" rev-parse --verify -q "$ref^{commit}")"; then
