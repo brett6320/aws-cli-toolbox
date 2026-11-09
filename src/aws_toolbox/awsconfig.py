@@ -138,6 +138,8 @@ def token_expiry(profile: SsoProfile, cache_dir: Path) -> datetime | None:
 
 def profile_name_for(account_name: str, prefix: str = "") -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", account_name.lower()).strip("-")
+    if prefix and slug.startswith(prefix.lower()):
+        slug = slug[len(prefix):]  # "acme-prod" with prefix "acme-" stays "acme-prod"
     return f"{prefix}{slug}"
 
 

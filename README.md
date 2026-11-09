@@ -284,6 +284,9 @@ profile_prefix = "globex-"
 - Give each org its own `profile_prefix`. If two orgs still produce the same
   name, whichever org's block already has it keeps it, and the other gets an
   account-ID suffix.
+- A name that already starts with the prefix doesn't get it twice: with
+  `profile_prefix = "acme-"`, an account named `ACME Prod` becomes `acme-prod`,
+  not `acme-acme-prod`. This applies to account names and table short names.
 - Once any `[orgs.*]` table exists, every other `[sync]` key is ignored. That
   includes `management_profile`, `sso_session`, `profile_prefix`,
   `exclude_accounts`, `source_profile` and `role_source_profiles`.

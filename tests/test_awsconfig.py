@@ -102,6 +102,11 @@ def test_reserved_profile_names_ignores_block():
 
 def test_profile_name_for():
     assert awsconfig.profile_name_for("Prod: Payments (EU)", "acme-") == "acme-prod-payments-eu"
+    # a name that already starts with the prefix doesn't get it twice
+    assert awsconfig.profile_name_for("ACME Prod", "acme-") == "acme-prod"
+    assert awsconfig.profile_name_for("acme-prod", "acme-") == "acme-prod"
+    assert awsconfig.profile_name_for("Acmeprod", "acme-") == "acme-acmeprod"  # not the whole prefix
+    assert awsconfig.profile_name_for("acme", "acme-") == "acme-acme"
 
 
 def test_sso_refresh_skips_when_refresh_token_still_works(isolated_aws, monkeypatch):
