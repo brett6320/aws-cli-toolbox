@@ -172,7 +172,8 @@ def test_table_keys_per_org_and_inherited_attrs():
     assert orgs["acme"]["attr_ou"] == "domain" and orgs["acme"]["include_inactive"] is True  # shared
     assert orgs["globex"]["attr_ou"] == "bu"                                                # overridden
     assert orgs["acme"]["ddb_table_arn"] == TABLE_ARN and orgs["globex"]["ddb_table_arn"] == ""
-    per_org = {"ddb_table_arn": "x", "ddb_profile": "x", "source_profile": "x", "role_source_profiles": {"R": "x"}}
+    per_org = {"ddb_table_arn": "x", "ddb_profile": "x", "source_profile": "x", "role_source_profiles": {"R": "x"},
+               "short_names": {"111111111111": "x"}}
     for key, value in per_org.items():  # per org only: a [sync] value would be ignored
         with pytest.raises(ValueError, match=f"\\[sync\\] {key} isn't used"):
             config.orgs({**cfg, "sync": {**cfg["sync"], key: value}})
@@ -588,3 +589,32 @@ def test_roles_default_to_role_source_profiles(isolated_aws, monkeypatch):
     monkeypatch.setenv("BG_DEFAULT_ROLES", "Account-Admin")
     assert sync_profiles.meta_settings(org, _args())["roles"] == ["Account-Admin"]
     assert sync_profiles.meta_settings(org, _args(roles="Platform-Admin"))["roles"] == ["Platform-Admin"]
+
+
+def test_short_names_override_the_table_and_skip_prefix_handling():
+    org = {"exclude_accounts": [], "profile_prefix": "bm-", "source_profile": "bm-src",
+           "short_names": {"111111111111": "bm-core", "222222222222": "billing"}}
+    accounts = [
+        {"id": "111111111111", "name": "Operations", "shortName": "ops", "domain": "Core", "env": "Prd"},
+        {"id": "222222222222", "name": "Payments", "shortName": "Payments", "domain": "Legacy", "env": None},
+    ]
+    sync_profiles.apply_short_names(accounts, org)
+    roles = sync_profiles.role_suffixes(["ReadOnly"], USER_SUFFIXES)
+    block = sync_profiles.build_role_block(accounts, org, {"region": "us-east-1", "output": "json"},
+                                           roles, "aws", reserved=set())
+    names = configparser.RawConfigParser()
+    names.read_string(block)
+    # used as written after the prefix, even when it starts like the prefix
+    assert names.sections() == ["profile bm-billing-ro", "profile bm-bm-core-ro"]
+    assert names["profile bm-billing-ro"]["role_arn"] == "arn:aws:iam::222222222222:role/ReadOnly"
+
+
+@pytest.mark.parametrize("value, err", [
+    ([], "must be a table"),
+    ({"1111": "x"}, "12-digit"),
+    ({"111111111111": "Bad Name"}, "lowercase"),
+    ({"111111111111": "-x"}, "lowercase"),
+])
+def test_short_names_validation(value, err):
+    assert err in sync_profiles.short_name_error({"short_names": value})
+    assert sync_profiles.short_name_error({"short_names": {"111111111111": "ok-1"}}) is None

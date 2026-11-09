@@ -57,6 +57,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # not listed chain from source_profile, which may be left empty when
         # every role is listed here. Per org, never inherited.
         "role_source_profiles": {},
+        # Fixed short name per account ID, e.g. { "111111111111" = "billing" }:
+        # profiles become <profile_prefix>billing<suffix>, whatever the table or
+        # the account name says. Per org, never inherited.
+        "short_names": {},
     },
     "netskope": {
         "bundle_path": "~/.aws/ca-bundle.pem",
@@ -121,7 +125,7 @@ def orgs(cfg: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return {"": dict(cfg["sync"])}
     # Per-org keys that would otherwise be silently ignored here; the last two
     # also decide the mode, so missing them quietly yields SSO profiles.
-    for key in ("ddb_table_arn", "ddb_profile", "source_profile", "role_source_profiles"):
+    for key in ("ddb_table_arn", "ddb_profile", "source_profile", "role_source_profiles", "short_names"):
         if cfg["sync"].get(key):
             raise ValueError(f"[sync] {key} isn't used once [orgs.*] tables exist; "
                              f"set it in each [orgs.<name>] instead")

@@ -92,6 +92,32 @@ def _profile_section(name: str, account_id: str, role: str, org: dict, defaults:
     return "\n".join(lines)
 
 
+SHORT_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
+
+
+def short_name_error(org: dict) -> str | None:
+    """Why org["short_names"] is unusable, or None."""
+    names = org["short_names"]
+    if not isinstance(names, dict):
+        return 'short_names must be a table of "account id" = "short name"'
+    for acct_id, short in names.items():
+        if not ACCOUNT_ID_RE.match(acct_id):
+            return f"short_names: {acct_id!r} is not a 12-digit account ID (quote it)"
+        if not isinstance(short, str) or not SHORT_NAME_RE.match(short):
+            return (f"short_names: {acct_id} = {short!r}; use lowercase letters, digits and "
+                    "single hyphens, without the profile_prefix")
+    return None
+
+
+def apply_short_names(accounts: list[dict], org: dict) -> None:
+    """Replace each listed account's short name with its fixed one."""
+    for acct in accounts:
+        short = org["short_names"].get(acct["id"])
+        if short:
+            acct["shortName"], acct["fixedName"] = short, True
+
+
 def build_block(accounts: list[dict], org: dict, defaults: dict, reserved: set[str]) -> str:
     excluded = {str(a) for a in org["exclude_accounts"]}
     suffix = org["admin_suffix"]
@@ -100,7 +126,10 @@ def build_block(accounts: list[dict], org: dict, defaults: dict, reserved: set[s
         if acct["id"] in excluded:
             log.debug("Excluding %s (%s)", acct["name"], acct["id"])
             continue
-        base = awsconfig.profile_name_for(acct["name"], org["profile_prefix"])
+        if acct["id"] in org["short_names"]:
+            base = f"{org['profile_prefix']}{org['short_names'][acct['id']]}"
+        else:
+            base = awsconfig.profile_name_for(acct["name"], org["profile_prefix"])
         if base == org["profile_prefix"]:
             base = f"{org['profile_prefix']}{acct['id']}"  # name had no usable characters
         # Names aren't unique in an Organization, and "Dev Adm" collides with
@@ -156,6 +185,8 @@ def build_role_block(accounts: list[dict], org: dict, defaults: dict, roles: lis
     kept = [a for a in accounts if a["id"] not in excluded]
 
     def base_for(acct: dict) -> str:
+        if acct.get("fixedName"):
+            return f"{prefix}{acct['shortName']}"  # short_names: used as written
         base = awsconfig.profile_name_for(acct["shortName"], prefix)
         return base if base != prefix else f"{prefix}{acct['id']}"  # no usable characters
 
@@ -263,6 +294,8 @@ def _check_org(name: str, org: dict, text: str, profile: str | None) -> str | No
         url = target.start_url
     else:
         url = org["sso_start_url"].rstrip("/")
+    if err := short_name_error(org):
+        return err
     role_sources = org["role_source_profiles"]
     if not isinstance(role_sources, dict) or not all(isinstance(v, str) and v for v in role_sources.values()):
         return 'role_source_profiles must be a table of role = "profile"'
@@ -455,6 +488,7 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
         meta, dupes = table
     tree = {**tree, "accounts": {k: v for k, v in tree["accounts"].items() if k not in dupes}}
     accounts = account_meta.merge(tree, meta)
+    apply_short_names(accounts, org)
     if table is not None:
         matched = sum(1 for a in accounts if a["hasMetadata"])
         if accounts and not matched and not args.force:
@@ -466,7 +500,7 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
             # The table's own account always stays: its profiles are how later
             # runs read the table if the configured access fails.
             named = [a for a in accounts if a["id"] == s["ddb_account_id"]
-                     or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
+                     or a.get("fixedName") or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
             log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
                      _label(name), len(named), len(accounts))
             accounts = named

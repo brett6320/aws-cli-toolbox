@@ -42,6 +42,9 @@ readonly_role = "ReadOnlyAccess"
 admin_role = "AdministratorAccess"
 admin_suffix = "-adm"
 profile_prefix = ""             # not repeated when a name already starts with it
+# Fixed short names by account ID, without the prefix; they win over the table
+# and the account name. Per org once [orgs.*] tables exist.
+# short_names = { "111111111111" = "core" }
 # Account IDs to leave out of generated profiles.
 exclude_accounts = []
 

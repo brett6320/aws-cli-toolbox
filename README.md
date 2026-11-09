@@ -304,6 +304,13 @@ profile_prefix = "globex-"
 - A name that already starts with the prefix doesn't get it twice: with
   `profile_prefix = "acme-"`, an account named `ACME Prod` becomes `acme-prod`,
   not `acme-acme-prod`. This applies to account names and table short names.
+- To pin an account's name, set `short_names` on the org, keyed by account ID:
+  `short_names = { "111111111111" = "core" }` gives `acme-core`, `acme-core-ro`
+  and so on. Give the name without the prefix (lowercase letters, digits and
+  hyphens), because it is used exactly as written. It replaces the table's short
+  name or the account name, works in both SSO and assume-role mode, and counts
+  as a short name for `require_short_name`. It's per org; in `[sync]` it's an
+  error once `[orgs.*]` tables exist.
 - Once any `[orgs.*]` table exists, every other `[sync]` key is ignored. That
   includes `management_profile`, `sso_session`, `profile_prefix`,
   `exclude_accounts`, `source_profile` and `role_source_profiles`.
