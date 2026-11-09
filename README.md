@@ -621,6 +621,15 @@ in the browser profile or container for that org. An org that uses
 before its first sync. An org configured with `sso_start_url` needs at least one
 profile first.
 
+`sso.manual_login` lists case-sensitive patterns matched against profile and
+sso-session names, such as `["*-ADM"]`. Their logins never open the browser, even on the main start URL:
+the CLI prints the URL and code and waits until you finish. They run after all
+the other logins. One token covers every profile on the same `sso_session`, so a
+pattern only takes effect when every profile sharing that token matches it
+(a warning says so otherwise); matching the session name covers them all.
+`--manual-login PATTERN` (repeatable) overrides the setting for one run, and
+`--list` marks these targets `M`.
+
 A login is skipped when its cached token has at least `sso.min_remaining_minutes`
 left. It's also skipped when the profile can still call STS, which covers
 tokens that botocore renewed with a refresh token. `--force` logs in anyway.
@@ -708,7 +717,7 @@ Command options:
 
 | Command | Options |
 |---|---|
-| `aws-sso-refresh` | `--force` (log in even if the token is valid), `--main-org ORG`, `--main-profile PROFILE`, `--list` (show targets and token status) |
+| `aws-sso-refresh` | `--force` (log in even if the token is valid), `--main-org ORG`, `--main-profile PROFILE`, `--manual-login PATTERN`, `--list` (show targets and token status) |
 | `aws-assume-role` | `--profile` (source credentials), `--session-name`, `--duration SECONDS`, `--format sh\|fish\|json` |
 | `aws-sts-decode` | `--profile` (decode with this profile), `--raw` (don't reformat the JSON) |
 | `aws-sync-profiles` | `--execute`/`--apply`, `--org ORG` (repeatable), `--profile` (override `management_profile`; one org), `--force` (rebuild with account names when the table is unreadable, or write an empty block). Table overrides, one org at a time: `--ddb-table-arn`, `--ddb-profile`, `--ddb-role-name`, `--attr-account-id`, `--attr-short-name`, `--attr-ou`, `--attr-environment`, `--roles A,B`, `--include-inactive` |

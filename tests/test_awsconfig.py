@@ -118,7 +118,7 @@ def test_sso_refresh_skips_when_refresh_token_still_works(isolated_aws, monkeypa
     monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
     monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
     monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: p.name == "dev")
-    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
     assert sso_refresh.run(args, config.load()) == 0
     # dev's session still works; main-org opens the browser; other-org gets --no-browser
     assert calls == [
@@ -154,7 +154,7 @@ def test_sso_refresh_main_org_and_session_only_targets(isolated_aws, monkeypatch
     monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
     monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
     monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
-    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
     assert sso_refresh.run(args, cfg) == 0
     # globex has no profiles yet, so it logs in by session name, without the browser.
     assert calls == [
@@ -162,4 +162,69 @@ def test_sso_refresh_main_org_and_session_only_targets(isolated_aws, monkeypatch
         ["/usr/bin/aws", "sso", "login", "--sso-session", "globex", "--no-browser"],
     ]
     args.main_org = "nope"
+    assert sso_refresh.run(args, cfg) == 2
+
+
+def test_sso_refresh_manual_login_never_opens_browser_and_goes_last(isolated_aws, monkeypatch):
+    import argparse
+    from aws_toolbox import config
+    from aws_toolbox.commands import sso_refresh
+    (isolated_aws / "config").write_text(
+        "[sso-session main-org]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[sso-session main-org-adm]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[sso-session globex]\nsso_start_url = https://globex.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[profile Platform-ADM]\nsso_session = main-org-adm\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        # shares main-org's token with a non-matching profile, so it stays a browser login
+        "[profile Shared-ADM]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        "[profile Platform-RO]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = ReadOnly\n\n"
+        "[profile globex-ro]\nsso_session = globex\nsso_account_id = 2\nsso_role_name = ReadOnly\n")
+    cfg = config.load()
+    cfg["sso"]["main_profile"] = "Platform-RO"
+    cfg["sso"]["manual_login"] = ["*-ADM"]
+    calls = []
+    monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
+    assert sso_refresh.run(args, cfg) == 0
+    assert calls == [
+        ["/usr/bin/aws", "sso", "login", "--profile", "Platform-RO"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "globex-ro", "--no-browser"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "Platform-ADM", "--no-browser"],
+    ]
+    # the command-line pattern replaces the setting
+    calls.clear()
+    args.manual_login = ["globex-*"]
+    assert sso_refresh.run(args, cfg) == 0
+    assert [c[4] for c in calls] == ["Platform-RO", "Platform-ADM", "globex-ro"]
+    assert "--no-browser" not in calls[1]
+
+
+def test_sso_refresh_manual_login_session_pattern_and_bad_type(isolated_aws, monkeypatch, caplog):
+    import argparse
+    from aws_toolbox import config
+    from aws_toolbox.commands import sso_refresh
+    (isolated_aws / "config").write_text(
+        "[sso-session main-org]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[sso-session main-org-adm]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[profile admin]\nsso_session = main-org-adm\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        "[profile Shared-ADM]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = Admin\n\n"
+        "[profile ro]\nsso_session = main-org\nsso_account_id = 1\nsso_role_name = ReadOnly\n")
+    cfg = config.load()
+    cfg["sso"]["main_profile"] = "ro"
+    cfg["sso"]["manual_login"] = "*-adm"  # a bare string is one pattern, not one per character
+    calls = []
+    monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
+    assert sso_refresh.run(args, cfg) == 0
+    assert calls == [
+        ["/usr/bin/aws", "sso", "login", "--profile", "ro"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "admin", "--no-browser"],
+    ]
+    cfg["sso"]["manual_login"] = ["*-ADM"]
+    sso_refresh.run(args, cfg)
+    assert "Shared-ADM match manual_login but share main-org's token" in caplog.text
+    cfg["sso"]["manual_login"] = [1]
     assert sso_refresh.run(args, cfg) == 2

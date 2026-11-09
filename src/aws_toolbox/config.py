@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "defaults": {"region": "us-east-1", "output": "json"},
-    "sso": {"main_profile": "main-org", "main_org": "", "min_remaining_minutes": 30},
+    "sso": {"main_profile": "main-org", "main_org": "", "min_remaining_minutes": 30, "manual_login": []},
     "assume_role": {"session_name": "", "duration_seconds": 3600},
     "sync": {
         "management_profile": "main-org",

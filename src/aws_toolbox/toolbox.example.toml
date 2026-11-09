@@ -15,6 +15,10 @@ main_org = ""
 main_profile = "main-org"
 # Skip login when the cached token is valid for at least this many minutes.
 min_remaining_minutes = 30
+# Profile (or sso-session) name patterns whose login never opens the browser:
+# the URL is printed and the login waits for you. These go last.
+# e.g. ["*-ADM"] for admin profiles signed in with another identity.
+manual_login = []
 
 [assume_role]
 session_name = ""          # empty = local username
