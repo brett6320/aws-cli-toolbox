@@ -320,6 +320,11 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
     if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
         raise ValueError("roles must be a list of role names")
     roles = [r.strip() for r in roles if r.strip()]
+    if not isinstance(org["role_source_profiles"], dict):
+        raise ValueError('role_source_profiles must be a table of role = "profile"')
+    if not roles and "roles" not in kwargs and not os.environ.get("BG_DEFAULT_ROLES"):
+        # No roles anywhere else: the roles given a first hop are the roles.
+        roles = list(org["role_source_profiles"])
     if roles and "roles" not in kwargs:
         kwargs["roles"] = roles
     if args.profile or org["management_profile"]:
@@ -328,8 +333,6 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
     if not settings["roles"]:
         raise ValueError("no roles configured (roles, BG_DEFAULT_ROLES or --roles)")
     settings["role_suffixes"] = role_suffixes(settings["roles"], org["role_suffixes"])
-    if not isinstance(org["role_source_profiles"], dict):
-        raise ValueError('role_source_profiles must be a table of role = "profile"')
     if not org["source_profile"]:
         unmapped = [r for r in settings["roles"] if r not in org["role_source_profiles"]]
         if unmapped:

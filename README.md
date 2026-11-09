@@ -330,7 +330,8 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
   profile has a comment line with the account name, ID, business domain
   (`ou`, or `Legacy`) and environment (`Lab`, `Sbx`, `Dev`, `Tst`, `Prd`, `Bil`).
 - **Roles:** one profile per role. The list is `roles` in `[sync]` (or per org),
-  else `BG_DEFAULT_ROLES`. `role_suffixes` maps each role to its suffix; a role
+  else `BG_DEFAULT_ROLES`, else the roles in the org's `role_source_profiles`
+  (in order), else `ReadOnly,Administrator`. `role_suffixes` maps each role to its suffix; a role
   that isn't mapped gets `-<role name>`. Suffixes must be `""` or lowercase like
   `-ro`, and no two roles can share one:
 
@@ -470,7 +471,7 @@ generated profiles, the least-privileged role is tried first.
 
 | Setting | Where | What it does |
 |---|---|---|
-| `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BG_DEFAULT_ROLES`. |
+| `roles` | `[sync]` or per org | The second-hop role names, one profile per role per account. The order sets the order in the file and the order in which roles are tried when the table is read through generated profiles (see "No table access yet (bootstrap)" above). Empty means `BG_DEFAULT_ROLES`, else the roles in `role_source_profiles`. |
 | `role_suffixes` | `[sync]` or per org | Role → profile-name suffix. `""` means no suffix (only one role can have it). Otherwise lowercase `-x`, `-x-y`, and so on. Suffixes must be unique. A role with no entry gets `-<role name>`, lowercased and made safe for a profile name. |
 | `source_profile` | per org (or `[sync]` when there are no `[orgs.*]`) | The default first hop, used for every role not in `role_source_profiles`. Optional when `role_source_profiles` lists every role. Setting either key switches the org to assume-role mode. |
 | `role_source_profiles` | per org (or `[sync]` when there are no `[orgs.*]`); never inherited | Role → first-hop profile. This is how each second-hop role gets its matching first hop. |

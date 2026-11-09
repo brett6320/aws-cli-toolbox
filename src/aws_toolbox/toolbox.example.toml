@@ -75,7 +75,7 @@ exclude_accounts = []
 #                                        # unset: warn, name profiles after accounts
 # ddb_profile = "acme-ops-ro"           # optional; per org. Profile that can read the table
 # profile_prefix = "acme-"
-# roles = []                               # [] = BG_DEFAULT_ROLES
+# roles = []                               # [] = BG_DEFAULT_ROLES, else role_source_profiles' roles
 # role_source_profiles = { "Read-Only-Plus" = "acme-sso-rop", "ReadOnly" = "acme-sso-ro", "Account-Admin" = "acme-sso-adm" }
 #                                          # per-role first hop; per org only
 #
