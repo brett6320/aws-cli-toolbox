@@ -31,7 +31,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # accounts come from the org tree,
         # short names/domains/environments from the account-mapping table at
         # ddb_table_arn, and one role_arn profile per role, chained from the
-        # role's role_source_profiles entry, else source_profile. roles = [] means BG_DEFAULT_ROLES. role_suffixes maps a
+        # role's role_source_profiles entry, else source_profile. roles = [] means BG_DEFAULT_ROLES, else the role_source_profiles roles. role_suffixes maps a
         # role to its profile-name suffix ("" = none); unmapped roles get
         # "-<role name>".
         "source_profile": "",

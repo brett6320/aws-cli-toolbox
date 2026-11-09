@@ -577,3 +577,13 @@ def test_source_profile_optional_when_every_role_has_one(isolated_aws):
     org = config.orgs(_role_cfg(source_profile="", **roles, role_source_profiles={"Account-Admin": "corp-adm"}))[""]
     with pytest.raises(ValueError, match="no source_profile for role.s. Platform-Admin"):
         sync_profiles.meta_settings(org, _args())
+
+
+def test_roles_default_to_role_source_profiles(isolated_aws, monkeypatch):
+    sources = {"Platform-Admin": "corp-src", "Account-Admin": "corp-adm"}
+    org = config.orgs(_role_cfg(source_profile="", roles=[], role_source_profiles=sources))[""]
+    assert sync_profiles.meta_settings(org, _args())["roles"] == ["Platform-Admin", "Account-Admin"]
+    # an explicit list still wins
+    monkeypatch.setenv("BG_DEFAULT_ROLES", "Account-Admin")
+    assert sync_profiles.meta_settings(org, _args())["roles"] == ["Account-Admin"]
+    assert sync_profiles.meta_settings(org, _args(roles="Platform-Admin"))["roles"] == ["Platform-Admin"]
