@@ -134,3 +134,43 @@ def test_mixed_file_blocks_install(env):
     assert "keep:       my-thing" in out.stderr
     assert (fd / "mixed.functions").read_text() == OLD + "my-thing() { :; }\n"
     assert not (fd / "aws-toolbox.functions").exists()
+
+
+def _install_pkg(env, *args, **extra):
+    """Dry-run that reaches the console-scripts step (not skipped)."""
+    tmp, repo, e, _ = env
+    e = {k: v for k, v in e.items() if k not in ("AWS_TOOLBOX_SKIP_UV", "PIP_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX_URL")}
+    e.update(HOME=str(tmp / "home"), XDG_DATA_HOME=str(tmp / "data"), **extra)
+    return subprocess.run(["/bin/bash", str(repo / "install.sh"), *args], capture_output=True, text=True, env=e)
+
+
+def test_index_url_is_used_and_its_credentials_hidden(env):
+    out = _install_pkg(env, "--installer", "uv", "--index-url", "https://user:s3cret@mirror.example/simple")
+    assert out.returncode == 0, out.stderr
+    assert "package index: https://***@mirror.example/simple" in out.stdout
+    assert "s3cret" not in out.stdout + out.stderr
+
+
+def test_pip_index_url_env_is_passed_to_uv(env):
+    out = _install_pkg(env, "--installer", "uv", PIP_INDEX_URL="https://mirror.example/simple")
+    assert out.returncode == 0, out.stderr
+    assert "package index: https://mirror.example/simple" in out.stdout
+
+
+def test_pip_installer_uses_a_private_venv(env):
+    tmp = env[0]
+    out = _install_pkg(env, "--installer", "pip")
+    assert out.returncode == 0, out.stderr
+    assert f"{tmp}/data/aws-cli-toolbox/venvs/" in out.stdout
+    assert f"{tmp}/home/.local/bin/aws-sync-profiles" in out.stdout
+    assert not (tmp / "data").exists() and not (tmp / "home" / ".local").exists()
+
+
+def test_bad_installer_is_rejected(env):
+    assert _install(env, "--installer", "brew").returncode == 2
+
+
+def test_uv_index_setting_is_shared_with_pip(env):
+    out = _install_pkg(env, "--installer", "pip", UV_DEFAULT_INDEX="https://mirror.example/simple")
+    assert out.returncode == 0, out.stderr
+    assert "package index: https://mirror.example/simple" in out.stdout
