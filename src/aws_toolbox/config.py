@@ -119,7 +119,9 @@ def orgs(cfg: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
                              "values, e.g. ddb_profile) in toolbox.toml instead")
     if not defined:
         return {"": dict(cfg["sync"])}
-    for key in ("ddb_table_arn", "ddb_profile"):
+    # Per-org keys that would otherwise be silently ignored here; the last two
+    # also decide the mode, so missing them quietly yields SSO profiles.
+    for key in ("ddb_table_arn", "ddb_profile", "source_profile", "role_source_profiles"):
         if cfg["sync"].get(key):
             raise ValueError(f"[sync] {key} isn't used once [orgs.*] tables exist; "
                              f"set it in each [orgs.<name>] instead")

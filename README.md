@@ -277,8 +277,10 @@ profile_prefix = "globex-"
   - `roles`, `role_suffixes`, `require_short_name`, `account_name_aliases`;
   - `ddb_role_name`, the `attr_*` keys, `include_inactive`.
 
-  Every other key is per org. `ddb_table_arn` and `ddb_profile` in `[sync]` are
-  an error once `[orgs.*]` tables exist.
+  Every other key is per org. `ddb_table_arn`, `ddb_profile`, `source_profile`
+  and `role_source_profiles` in `[sync]` are an error once `[orgs.*]` tables
+  exist; set them in each org. (An org without `source_profile` or
+  `role_source_profiles` gets SSO profiles, and the run logs "SSO mode".)
 - Give each org its own `profile_prefix`. If two orgs still produce the same
   name, whichever org's block already has it keeps it, and the other gets an
   account-ID suffix.
