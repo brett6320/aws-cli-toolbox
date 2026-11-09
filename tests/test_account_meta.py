@@ -614,7 +614,32 @@ def test_short_names_override_the_table_and_skip_prefix_handling():
     ({"1111": "x"}, "12-digit"),
     ({"111111111111": "Bad Name"}, "lowercase"),
     ({"111111111111": "-x"}, "lowercase"),
+    ({"111111111111": "core\n"}, "lowercase"),
+    ({"111111111111\n": "core"}, "12-digit"),
+    ({"111111111111": "core", "222222222222": "core"}, "both use 'core'"),
 ])
 def test_short_names_validation(value, err):
     assert err in sync_profiles.short_name_error({"short_names": value})
     assert sync_profiles.short_name_error({"short_names": {"111111111111": "ok-1"}}) is None
+
+
+@mock_aws
+def test_sync_short_names_rescue_duplicate_rows_and_warn_unknown(isolated_aws, caplog):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    twice = org.create_account(AccountName="Twice", Email="t@example.com")["CreateAccountStatus"]["AccountId"]
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, short in enumerate(("tw1", "tw2")):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": twice}, "accountShortCode": {"S": short}})
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"},
+                    short_names={twice: "pinned", "999999999999": "gone"})
+    assert sync_profiles.run(_args(execute=True, force=True), cfg) == 0
+    text = path.read_text()
+    assert f"[profile corp-pinned-ro]\nrole_arn = arn:aws:iam::{twice}:role/ReadOnly" in text
+    assert "short_names for 999999999999 match no active account" in caplog.text

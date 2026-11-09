@@ -92,8 +92,8 @@ def _profile_section(name: str, account_id: str, role: str, org: dict, defaults:
     return "\n".join(lines)
 
 
-SHORT_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
+SHORT_NAME_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")  # fullmatch: no trailing newline
+ACCOUNT_ID_RE = re.compile(r"[0-9]{12}")
 
 
 def short_name_error(org: dict) -> str | None:
@@ -101,13 +101,23 @@ def short_name_error(org: dict) -> str | None:
     names = org["short_names"]
     if not isinstance(names, dict):
         return 'short_names must be a table of "account id" = "short name"'
+    seen: dict[str, str] = {}
     for acct_id, short in names.items():
-        if not ACCOUNT_ID_RE.match(acct_id):
-            return f"short_names: {acct_id!r} is not a 12-digit account ID (quote it)"
-        if not isinstance(short, str) or not SHORT_NAME_RE.match(short):
+        if not ACCOUNT_ID_RE.fullmatch(acct_id):
+            return f"short_names: {acct_id!r} is not a 12-digit account ID"
+        if not isinstance(short, str) or not SHORT_NAME_RE.fullmatch(short):
             return (f"short_names: {acct_id} = {short!r}; use lowercase letters, digits and "
                     "single hyphens, without the profile_prefix")
+        if short in seen:
+            return f"short_names: {seen[short]} and {acct_id} both use {short!r}"
+        seen[short] = acct_id
     return None
+
+
+def warn_unknown_short_names(accounts: list[dict], org: dict, label: str) -> None:
+    missing = sorted(set(org["short_names"]) - {a["id"] for a in accounts})
+    if missing:
+        log.warning("%s: short_names for %s match no active account in the org", label, ", ".join(missing))
 
 
 def apply_short_names(accounts: list[dict], org: dict) -> None:
@@ -486,8 +496,11 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
         meta, dupes = {}, set()
     else:
         meta, dupes = table
-    tree = {**tree, "accounts": {k: v for k, v in tree["accounts"].items() if k not in dupes}}
+    # A pinned account's name doesn't depend on its (ambiguous) table rows.
+    tree = {**tree, "accounts": {k: v for k, v in tree["accounts"].items()
+                                 if k not in dupes or k in org["short_names"]}}
     accounts = account_meta.merge(tree, meta)
+    warn_unknown_short_names(accounts, org, _label(name))
     apply_short_names(accounts, org)
     if table is not None:
         matched = sum(1 for a in accounts if a["hasMetadata"])
@@ -501,7 +514,7 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
             # runs read the table if the configured access fails.
             named = [a for a in accounts if a["id"] == s["ddb_account_id"]
                      or a.get("fixedName") or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
-            log.info("%s: %d of %d accounts have a short name in the table; skipping the rest",
+            log.info("%s: %d of %d accounts have a short name (table or short_names); skipping the rest",
                      _label(name), len(named), len(accounts))
             accounts = named
     if s["ddb_account_id"] and (s["ddb_account_id"] not in {a["id"] for a in accounts} or
@@ -534,6 +547,7 @@ def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: di
     log.info("%s: found %d active accounts", _label(name), len(accounts))
     log.info("%s: SSO mode (no source_profile or role_source_profiles): sso_role_name %s / %s",
              _label(name), org["readonly_role"], org["admin_role"])
+    warn_unknown_short_names(accounts, org, _label(name))
     block = build_block(accounts, org, cfg["defaults"], awsconfig.reserved_profile_names(text, name))
     if not block and not args.force:
         log.error("%s: no profiles to write; refusing to empty its managed block (use --force)", _label(name))

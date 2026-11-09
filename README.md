@@ -309,8 +309,10 @@ profile_prefix = "globex-"
   and so on. Give the name without the prefix (lowercase letters, digits and
   hyphens), because it is used exactly as written. It replaces the table's short
   name or the account name, works in both SSO and assume-role mode, and counts
-  as a short name for `require_short_name`. It's per org; in `[sync]` it's an
-  error once `[orgs.*]` tables exist.
+  as a short name for `require_short_name`. A pinned account is kept even when
+  the table has duplicate rows for it. `account_name_aliases` still adds its
+  account-name profiles. An ID that matches no active account logs a warning.
+  It's per org; in `[sync]` it's an error once `[orgs.*]` tables exist.
 - Once any `[orgs.*]` table exists, every other `[sync]` key is ignored. That
   includes `management_profile`, `sso_session`, `profile_prefix`,
   `exclude_accounts`, `source_profile` and `role_source_profiles`.
