@@ -1,10 +1,10 @@
 """aws-sso-refresh: log in to every distinct SSO start URL in ~/.aws/config.
 
+Only profiles that name an account (sso_account_id) are login targets.
 The main org (or main profile) logs in first and opens the browser. Other
 start URLs are logged in with --no-browser so the user can open the printed
 URL in an alternate browser profile/container. Targets matching an [sso]
-manual_login pattern (e.g. "*-ADM") never open the browser and go last. Each
-[orgs.<name>] sso_session is a target even before any profile uses it.
+manual_login pattern (e.g. "*-ADM") never open the browser and go last.
 
 boto3 has no public SSO device-login helper, so this drives `aws sso login`,
 which also maintains the token cache the CLI and boto3 read.
@@ -60,7 +60,7 @@ def plan_logins(
     if main_profile:
         main = next((p for p in profiles if p.name == main_profile), None)
         if main is None:
-            log.warning("Main profile %r not found or has no SSO settings", main_profile)
+            log.warning("Main profile %r not found, or has no SSO settings or sso_account_id", main_profile)
             main_url = None
         else:
             by_key[main.cache_key] = main
@@ -81,25 +81,6 @@ def plan_logins(
     # manual ones (URL printed, user acts on it) after everything else.
     targets.sort(key=lambda p: (is_manual(p, manual), p.start_url != main_url))
     return targets, main_url
-
-
-def org_session_targets(
-    parser, orgs: dict[str, dict], profiles: list[awsconfig.SsoProfile]
-) -> list[awsconfig.SsoProfile]:
-    """Each org's [sso-session] that no profile uses yet, as its own target."""
-    used = {p.cache_key for p in profiles}
-    out = []
-    for name, org in orgs.items():
-        session = org["sso_session"]
-        if not session or session in used:
-            continue
-        target = awsconfig.sso_session_target(parser, session)
-        if target is None:
-            log.warning("[orgs.%s] sso_session %r not found in ~/.aws/config", name, session)
-            continue
-        used.add(session)
-        out.append(target)
-    return out
 
 
 def org_start_url(parser, org: dict) -> str | None:
@@ -136,8 +117,7 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
     except ValueError as e:
         log.error("%s: %s", config.config_path(), e)
         return 2
-    profiles = awsconfig.sso_profiles(parser)
-    profiles += org_session_targets(parser, orgs, profiles)
+    profiles = [p for p in awsconfig.sso_profiles(parser) if p.account_id]
     manual = args.manual_login or cfg["sso"]["manual_login"]
     if isinstance(manual, str):
         manual = [manual]
@@ -157,7 +137,7 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
             log.warning("Can't resolve [orgs.%s] start URL; no login will open the browser", main_org)
         targets, main_url = plan_logins(profiles, main_url=main_url, manual=manual)
     if not targets:
-        log.error("No SSO profiles found in %s", config.aws_config_path())
+        log.error("No SSO profiles with sso_account_id found in %s", config.aws_config_path())
         return 1
 
     aws = shutil.which("aws")
@@ -179,8 +159,7 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
                 status = "expired"
             else:
                 status = f"{'valid' if valid else 'refresh due'}, expires {expiry:%Y-%m-%d %H:%M %Z}"
-            label = f"(sso-session) {target.name}" if target.session_only else target.name
-            print(f"{'*' if is_main else 'M' if manual_target else ' '} {label:30} {target.start_url}  [{status}]")
+            print(f"{'*' if is_main else 'M' if manual_target else ' '} {target.name:30} {target.start_url}  [{status}]")
             continue
         if not args.force:
             if valid:
@@ -191,7 +170,7 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
                          target.start_url, target.name)
                 continue
 
-        cmd = [aws, "sso", "login", "--sso-session" if target.session_only else "--profile", target.name]
+        cmd = [aws, "sso", "login", "--profile", target.name]
         if manual_target:
             cmd.append("--no-browser")
             log.info("Logging in to %s via %s (manual_login) — open the URL below yourself; "
