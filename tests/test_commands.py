@@ -383,3 +383,59 @@ def test_build_block_short_names():
     accounts = [{"id": "111111111111", "name": "Core Networking"}, {"id": "222222222222", "name": "Dev"}]
     assert _names(sync_profiles.build_block(accounts, cfg["sync"], cfg["defaults"], reserved=set())) == [
         "acme-core", "acme-core-adm", "acme-dev", "acme-dev-adm"]
+
+
+def test_log_colors_only_on_a_terminal(monkeypatch):
+    import io
+    import logging
+    from aws_toolbox import cli
+    record = logging.LogRecord("aws_toolbox", logging.WARNING, __file__, 1, "careful", None, None)
+    assert cli.ColorFormatter("%(message)s").format(record) == "\033[33mcareful\033[0m"
+    record.levelno = logging.INFO
+    assert cli.ColorFormatter("%(message)s").format(record) == "careful"
+    tty = io.StringIO()
+    tty.isatty = lambda: True
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert cli._use_color(tty) and not cli._use_color(io.StringIO())
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not cli._use_color(tty)
+
+
+def test_sync_summary_keeps_every_orgs_warnings_on_failure_and_exception(isolated_aws, caplog):
+    import logging
+    from botocore.exceptions import ClientError
+    (isolated_aws / "config").write_text(MULTI_ORG_CONFIG)
+    acme = [{"id": "111111111111", "name": "Ops"}]
+    args = argparse.Namespace(execute=False, apply=False, org=None, profile=None, force=False)
+    caplog.set_level(logging.INFO)
+    held_warning = mock.patch.object(sync_profiles, "warn_unknown_short_names",
+                                     side_effect=lambda a, o, label: sync_profiles.log.warning("%s: held", label))
+
+    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "nope"}}, "ListAccounts")
+    patches = _fake_orgs({"acme-mgmt": acme, "globex-mgmt": denied})
+    with patches[0], patches[1], patches[2], held_warning:
+        assert sync_profiles.run(args, _multi_org_cfg()) == 1
+    msgs = [r.getMessage() for r in caplog.records]
+    assert msgs.index("Summary:") < msgs.index("[orgs.acme]: held")
+    assert "[orgs.acme]: 1 accounts in the org; 2 profiles for 1 accounts, 1 warning(s):" in msgs
+    assert msgs.index("[orgs.globex]: failed; its managed block is unchanged:") < \
+        msgs.index("[orgs.globex]: AWS error AccessDenied: nope")
+
+    # a later org raising still releases the earlier org's held warnings
+    caplog.clear()
+    real_build_block = sync_profiles.build_block
+    builds = iter([real_build_block, None])
+
+    def build_then_fail(*a, **kw):
+        build = next(builds)
+        if build is None:
+            raise RuntimeError("boom")
+        return build(*a, **kw)
+
+    patches = _fake_orgs({"acme-mgmt": acme, "globex-mgmt": acme})
+    with patches[0], patches[1], patches[2], held_warning, \
+         mock.patch.object(sync_profiles, "build_block", side_effect=build_then_fail):
+        with pytest.raises(RuntimeError):
+            sync_profiles.run(args, _multi_org_cfg())
+    msgs = [r.getMessage() for r in caplog.records]
+    assert "[orgs.acme]: held" in msgs and "[orgs.globex]: held" in msgs

@@ -12,7 +12,9 @@ else from source_profile.
 
 Each org's profiles are written to its own marked block in ~/.aws/config;
 everything outside those blocks is left untouched. Read-only against AWS.
-Dry-run by default.
+Dry-run by default. Warnings raised while syncing (skipped accounts, renamed
+profiles, ...) are held back and printed after the diff, in a per-org summary
+with account and profile counts.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import re
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -453,7 +456,7 @@ def read_table(name: str, s: dict, org_session, text: str) -> tuple[dict, set[st
 
 
 def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argparse.Namespace,
-                   cfg: dict) -> str | None:
+                   cfg: dict, stats: dict) -> str | None:
     """Assume-role mode: org tree + metadata table -> role_arn profiles."""
     s = settings
     log.debug("%s: org profile %s, table %s", _label(name), s["profile"], s["ddb_table_arn"])
@@ -468,6 +471,7 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     except (BotoCoreError, RuntimeError) as e:
         log.error("%s: %s", _label(name), e)
         return None
+    stats["accounts"] = len(tree["accounts"])
 
     if not s["ddb_table_arn"]:
         log.warning("%s: no metadata table configured (ddb_table_arn); naming profiles after "
@@ -514,8 +518,10 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
             # runs read the table if the configured access fails.
             named = [a for a in accounts if a["id"] == s["ddb_account_id"]
                      or a.get("fixedName") or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
-            log.info("%s: %d of %d accounts have a short name (table or short_names); skipping the rest",
-                     _label(name), len(named), len(accounts))
+            skipped = sorted(a["id"] for a in accounts if a not in named)
+            if skipped:
+                log.warning("%s: require_short_name: skipping %d account(s) with no short name in the "
+                            "table or short_names: %s", _label(name), len(skipped), ", ".join(skipped))
             accounts = named
     if s["ddb_account_id"] and (s["ddb_account_id"] not in {a["id"] for a in accounts} or
                                 s["ddb_account_id"] in {str(x) for x in org["exclude_accounts"]}):
@@ -530,7 +536,8 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     return awsconfig.replace_managed_block(text, block, name)
 
 
-def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: dict) -> str | None:
+def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: dict,
+              stats: dict) -> str | None:
     """`text` with the org's block regenerated, or None if the org failed."""
     profile = args.profile or org["management_profile"]
     log.debug("%s: listing accounts with profile %s", _label(name), profile)
@@ -545,6 +552,7 @@ def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: di
         log.error("%s: %s", _label(name), e)
         return None
     log.info("%s: found %d active accounts", _label(name), len(accounts))
+    stats["accounts"] = len(accounts)
     log.info("%s: SSO mode (no source_profile or role_source_profiles): sso_role_name %s / %s",
              _label(name), org["readonly_role"], org["admin_role"])
     warn_unknown_short_names(accounts, org, _label(name))
@@ -553,6 +561,71 @@ def _sync_org(name: str, org: dict, text: str, args: argparse.Namespace, cfg: di
         log.error("%s: no profiles to write; refusing to empty its managed block (use --force)", _label(name))
         return None
     return awsconfig.replace_managed_block(text, block, name)
+
+
+class _HeldWarnings(logging.Handler):
+    """Keeps WARNING and above for the summary; passes everything else on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.records.append(record)
+        else:
+            logging.getLogger().handle(record)
+
+
+@contextmanager
+def _hold_warnings():
+    """Hold this package's warnings back (yielding the list they collect in)."""
+    pkg = logging.getLogger("aws_toolbox")
+    held = _HeldWarnings()
+    propagate, pkg.propagate = pkg.propagate, False
+    pkg.addHandler(held)
+    try:
+        yield held.records
+    finally:
+        pkg.removeHandler(held)
+        pkg.propagate = propagate
+
+
+def _release(records: list[logging.LogRecord]) -> None:
+    for record in records:
+        logging.getLogger().handle(record)
+    records.clear()
+
+
+def _block_counts(text: str, org: str) -> tuple[int, int] | None:
+    """(profiles, distinct accounts) in the org's managed block, or None if it won't parse."""
+    try:
+        parser = awsconfig.read_text(awsconfig.managed_block(text, org))
+    except configparser.Error:
+        return None
+    accounts = set()
+    for section in parser.sections():
+        opts = parser[section]
+        m = re.match(r"^arn:[^:]+:iam::(\d{12}):", opts.get("role_arn", ""))
+        accounts.add(opts.get("sso_account_id") or (m.group(1) if m else section))
+    return len(parser.sections()), len(accounts)
+
+
+def _summary(selected: list[str], results: dict, text: str) -> None:
+    """Per-org counts, then the warnings held back while that org synced."""
+    sys.stdout.flush()  # the diff goes first
+    log.info("Summary:")
+    for name in selected:
+        ok, stats, held = results[name]
+        if ok:
+            profiles, accounts = _block_counts(text, name) or ("?", "?")
+            found = stats.get("accounts")
+            log.info("%s: %s accounts in the org; %s profiles for %s accounts%s", _label(name),
+                     "?" if found is None else found, profiles, accounts,
+                     f", {len(held)} warning(s):" if held else "")
+        else:
+            log.info("%s: failed; its managed block is unchanged:", _label(name))
+        _release(held)
 
 
 def run(args: argparse.Namespace, cfg: dict) -> int:
@@ -603,29 +676,41 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
     if errors:
         return 2
 
-    updated, failures = current, 0
-    for name in selected:
-        if name in settings:
-            result = _sync_role_org(name, orgs[name], updated, settings[name], args, cfg)
-        else:
-            result = _sync_org(name, orgs[name], updated, args, cfg)
-        if result is None:
-            failures += 1  # leave this org's block as it was; other orgs still sync
-        else:
-            updated = result
+    updated, failures, results = current, 0, {}
+    try:
+        for name in selected:
+            stats: dict = {}
+            with _hold_warnings() as held:
+                results[name] = (False, stats, held)
+                if name in settings:
+                    result = _sync_role_org(name, orgs[name], updated, settings[name], args, cfg, stats)
+                else:
+                    result = _sync_org(name, orgs[name], updated, args, cfg, stats)
+            results[name] = (result is not None, stats, held)
+            if result is None:
+                failures += 1  # leave this org's block as it was; other orgs still sync
+            else:
+                updated = result
+    except BaseException:
+        for _, _, held in results.values():
+            _release(held)  # don't lose any org's warnings if the run dies
+        raise
     try:
         configparser.RawConfigParser().read_string(updated)  # botocore parses strictly
     except configparser.Error as e:
+        _summary(selected, results, updated)
         log.error("Generated config would not parse; not writing: %s", e)
         return 1
 
     if updated == current:
+        _summary(selected, results, updated)
         if not failures:
             log.info("%s already up to date", path)
         return 1 if failures else 0
     diff = difflib.unified_diff(current.splitlines(True), updated.splitlines(True),
                                 fromfile=str(path), tofile=f"{path} (new)")
     sys.stdout.writelines(diff)
+    _summary(selected, results, updated)
 
     if not execute:
         log.info("[DRY-RUN] Would update %s. Pass --execute or --apply to write.", path)
