@@ -8,7 +8,7 @@ Boto3 should use the system truststore (truststore module on macOS).
 
 # Functions
 
-- aws-sso-refresh - This reviews `~/.aws/config` for profiles which have a direct start URL specified. The "main-org" profile should be used first - when using this profile, open a browser to authenticate automatically. If the URL is different for subsequent profiles, don't auto-open the browser, just present the URL to the user for manual use (alternate browser profile/container is likely).
+- aws-sso-refresh - This reviews `~/.aws/config` for SSO profiles that name an account (`sso_account_id`). The "main-org" profile should be used first - when using this profile, open a browser to authenticate automatically. If the URL is different for subsequent profiles, don't auto-open the browser, just present the URL to the user for manual use (alternate browser profile/container is likely).
 
 - aws-assume-role - This allows the user to assume a role, defaulting ot the current account accepting alternate account, combined with role name as args.
 

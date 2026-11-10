@@ -23,7 +23,6 @@ class SsoProfile:
     account_id: str | None = None
     role_name: str | None = None
     raw_start_url: str | None = None  # exactly as written in the config
-    session_only: bool = False  # an [sso-session] no profile uses yet; `name` is the session
 
     @property
     def cache_key(self) -> str:
@@ -89,14 +88,13 @@ def sso_profiles(parser: configparser.RawConfigParser) -> list[SsoProfile]:
 
 
 def sso_session_target(parser: configparser.RawConfigParser, session: str) -> SsoProfile | None:
-    """An [sso-session] as a login target of its own (`aws sso login --sso-session`)."""
+    """An [sso-session]'s start URL and region, as an SsoProfile named after the session."""
     section = f"sso-session {session}"
     if not parser.has_section(section) or not parser[section].get("sso_start_url"):
         return None
     start_url = parser[section]["sso_start_url"]
     return SsoProfile(name=session, start_url=start_url.rstrip("/"), raw_start_url=start_url,
-                      region=parser[section].get("sso_region", ""), session=session,
-                      session_only=True)
+                      region=parser[section].get("sso_region", ""), session=session)
 
 
 def profile_start_url(parser: configparser.RawConfigParser, name: str, _depth: int = 0) -> str | None:

@@ -623,12 +623,12 @@ aws-sso-refresh --list     # what will be logged in, and token status
 aws-sso-refresh            # log in where needed
 ```
 
+Only profiles that set `sso_account_id` are logged in; an `[sso-session]` or
+start URL that no such profile uses is skipped, so a new org needs at least one
+account profile (such as its management profile) before its first sync.
 Logins for the main org's (or main profile's) start URL go first and open your
 default browser. For any other start URL, the CLI prints a URL and code. Open it
-in the browser profile or container for that org. An org that uses
-`sso_session` is logged in even before any profile uses it, so it can sign in
-before its first sync. An org configured with `sso_start_url` needs at least one
-profile first.
+in the browser profile or container for that org.
 
 `sso.manual_login` lists case-sensitive patterns matched against profile and
 sso-session names, such as `["*-ADM"]`. Their logins never open the browser, even on the main start URL:
@@ -712,7 +712,7 @@ the same account under the new naming.
 
 | Command | Does | Writes? |
 |---|---|---|
-| `aws-sso-refresh` | Logs in once per SSO token cache: each `[sso-session]` a profile or org uses, and each direct start URL | SSO token cache only |
+| `aws-sso-refresh` | Logs in once per SSO token cache used by a profile with `sso_account_id` | SSO token cache only |
 | `aws-assume-role ROLE [ACCOUNT]` | `sts:AssumeRole` and exports the creds (shell function) | Shell env only |
 | `aws-clear-identity` | Unsets creds and `AWS_PROFILE` (shell function) | Shell env only |
 | `aws-profile [-n] [PROFILE]` | Sets `AWS_PROFILE`; fzf picker; SSO login if expired (zsh) | Shell env only |

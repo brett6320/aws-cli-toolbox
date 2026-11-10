@@ -120,10 +120,9 @@ def test_sso_refresh_skips_when_refresh_token_still_works(isolated_aws, monkeypa
     monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: p.name == "dev")
     args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
     assert sso_refresh.run(args, config.load()) == 0
-    # dev's session still works; main-org opens the browser; other-org gets --no-browser
+    # dev's session still works; main-org opens the browser; other-org names no account
     assert calls == [
         ["/usr/bin/aws", "sso", "login", "--profile", "main-org"],
-        ["/usr/bin/aws", "sso", "login", "--profile", "other-org", "--no-browser"],
     ]
 
 
@@ -138,14 +137,15 @@ def test_org_blocks_are_independent_and_match_whole_lines():
     assert awsconfig.has_managed_block(text, "acme2") and not awsconfig.has_managed_block(text, "globex")
 
 
-def test_sso_refresh_main_org_and_session_only_targets(isolated_aws, monkeypatch):
+def test_sso_refresh_main_org_and_only_profiles_with_an_account(isolated_aws, monkeypatch):
     import argparse
     from aws_toolbox import config
     from aws_toolbox.commands import sso_refresh
     (isolated_aws / "config").write_text(
         "[sso-session acme]\nsso_start_url = https://acme.awsapps.com/start#/\nsso_region = us-east-2\n\n"
         "[sso-session globex]\nsso_start_url = https://globex.awsapps.com/start\nsso_region = us-east-1\n\n"
-        "[profile acme-net-ro]\nsso_session = acme\nsso_account_id = 1\nsso_role_name = R\n")
+        "[profile acme-net-ro]\nsso_session = acme\nsso_account_id = 1\nsso_role_name = R\n\n"
+        "[profile globex-other]\nsso_session = globex\nsso_region = us-east-1\n")
     cfg = config.load()
     cfg["sso"]["main_org"] = "acme"
     cfg["orgs"] = {"acme": {"sso_session": "acme", "management_profile": "acme-net-ro"},
@@ -156,10 +156,9 @@ def test_sso_refresh_main_org_and_session_only_targets(isolated_aws, monkeypatch
     monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
     args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
     assert sso_refresh.run(args, cfg) == 0
-    # globex has no profiles yet, so it logs in by session name, without the browser.
+    # globex has no profile with sso_account_id, so it isn't logged in at all.
     assert calls == [
         ["/usr/bin/aws", "sso", "login", "--profile", "acme-net-ro"],
-        ["/usr/bin/aws", "sso", "login", "--sso-session", "globex", "--no-browser"],
     ]
     args.main_org = "nope"
     assert sso_refresh.run(args, cfg) == 2
@@ -228,3 +227,26 @@ def test_sso_refresh_manual_login_session_pattern_and_bad_type(isolated_aws, mon
     assert "Shared-ADM match manual_login but share main-org's token" in caplog.text
     cfg["sso"]["manual_login"] = [1]
     assert sso_refresh.run(args, cfg) == 2
+
+
+def test_sso_refresh_main_profile_without_account_still_picks_browser_login(isolated_aws, monkeypatch):
+    import argparse
+    from aws_toolbox import config
+    from aws_toolbox.commands import sso_refresh
+    (isolated_aws / "config").write_text(
+        "[profile main-org]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[profile acct]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n"
+        "sso_account_id = 111111111111\nsso_role_name = R\n\n"
+        "[profile other]\nsso_start_url = https://other.awsapps.com/start\nsso_region = us-east-1\n"
+        "sso_account_id = 222222222222\nsso_role_name = R\n")
+    calls = []
+    monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
+    assert sso_refresh.run(args, config.load()) == 0
+    # main-org names no account, so it isn't logged in, but its URL still opens the browser.
+    assert calls == [
+        ["/usr/bin/aws", "sso", "login", "--profile", "acct"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "other", "--no-browser"],
+    ]
