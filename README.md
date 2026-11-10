@@ -655,6 +655,14 @@ With several orgs, each one gets its own `# BEGIN/END aws-toolbox managed
 profiles: <org>` block. If one org fails (expired login, access denied), its block
 is left as it was, the other orgs are still written, and the command exits 1.
 
+After the diff comes a summary for each org: how many accounts the org has, and
+how many profiles were generated for how many accounts. Below each org's line are
+the toolbox's warnings and errors from its sync, held back until then so they don't
+get lost above a long diff: duplicate table rows, accounts skipped by
+`require_short_name`, names that were taken and got an account ID appended, and so
+on. If the profile count looks low, start there. With `-q` only those warnings and
+errors are printed, without the count lines.
+
 How profiles are named depends on the org:
 - **SSO orgs:** each active account gets `<name>` (`readonly_role`) and
   `<name>-adm` (`admin_role`).
@@ -738,7 +746,8 @@ Command options:
 
 Every command takes `-v`/`--verbose`, `-q`/`--quiet` and `--help`, placed after
 the command name. Each one also works as `aws-toolbox <command>`. Logs go to
-stderr; stdout carries only results (diffs, JSON, shell exports).
+stderr; stdout carries only results (diffs, JSON, shell exports). On a terminal,
+warnings are yellow and errors red; set `NO_COLOR=1` to turn that off.
 
 ## Platform notes
 

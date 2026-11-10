@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from types import ModuleType
 
@@ -31,14 +32,30 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-q", "--quiet", action="store_true", help="Warnings and errors only")
 
 
+LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s — %(message)s"
+LOG_COLORS = {logging.WARNING: "\033[33m", logging.ERROR: "\033[31m", logging.CRITICAL: "\033[1;31m"}
+
+
+class ColorFormatter(logging.Formatter):
+    """Colors warning and error lines (yellow, red)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        color = LOG_COLORS.get(record.levelno)
+        return f"{color}{text}\033[0m" if color else text
+
+
+def _use_color(stream) -> bool:
+    # https://no-color.org: any non-empty NO_COLOR disables color
+    return not os.environ.get("NO_COLOR") and hasattr(stream, "isatty") and stream.isatty()
+
+
 def _setup_logging(args: argparse.Namespace) -> None:
     level = logging.DEBUG if args.verbose else logging.WARNING if args.quiet else logging.INFO
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
+    handler = logging.StreamHandler(sys.stderr)
+    formatter = ColorFormatter if _use_color(sys.stderr) else logging.Formatter
+    handler.setFormatter(formatter(LOG_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S"))
+    logging.basicConfig(level=level, handlers=[handler])
     if not args.verbose:
         logging.getLogger("botocore").setLevel(logging.WARNING)
 

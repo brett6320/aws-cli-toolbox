@@ -643,3 +643,39 @@ def test_sync_short_names_rescue_duplicate_rows_and_warn_unknown(isolated_aws, c
     text = path.read_text()
     assert f"[profile corp-pinned-ro]\nrole_arn = arn:aws:iam::{twice}:role/ReadOnly" in text
     assert "short_names for 999999999999 match no active account" in caplog.text
+
+
+@mock_aws
+def test_sync_summary_follows_the_diff_with_counts_and_held_warnings(isolated_aws, capsys, caplog):
+    import logging
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    twice = org.create_account(AccountName="Twice", Email="t@example.com")["CreateAccountStatus"]["AccountId"]
+    org.create_account(AccountName="Once", Email="o@example.com")
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, short in enumerate(("tw1", "tw2")):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": twice}, "accountShortCode": {"S": short}})
+    (isolated_aws / "config").write_text(CORP_CONFIG)
+    cfg = _role_cfg(roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"})
+    caplog.set_level(logging.INFO)
+    order = []
+    real_write = sync_profiles.sys.stdout.writelines
+    with mock.patch.object(sync_profiles.sys.stdout, "writelines",
+                           side_effect=lambda lines: (order.append("diff"), real_write(lines))):
+        handler = logging.Handler()
+        handler.emit = lambda r: order.append(r.getMessage())
+        logging.getLogger().addHandler(handler)
+        try:
+            assert sync_profiles.run(_args(force=True), cfg) == 0
+        finally:
+            logging.getLogger().removeHandler(handler)
+    dupe = f"Account {twice} appears in more than one table row; skipping it"
+    # the duplicate-row warning is held until after the diff, under the summary line
+    assert order.index("diff") < order.index("Summary:") < order.index(dupe)
+    summary = next(m for m in order if m.startswith("[sync]: ") and "accounts in the org" in m)
+    assert summary.startswith("[sync]: 3 accounts in the org; 2 profiles for 2 accounts")
+    assert order.index(summary) < order.index(dupe)
