@@ -1,4 +1,4 @@
-"""aws-sso-refresh: log in to every distinct SSO start URL in ~/.aws/config.
+"""aws-sso-refresh: log in to every SSO token cache an account profile uses.
 
 Only profiles that name an account (sso_account_id) are login targets.
 The main org (or main profile) logs in first and opens the browser. Other
@@ -60,7 +60,7 @@ def plan_logins(
     if main_profile:
         main = next((p for p in profiles if p.name == main_profile), None)
         if main is None:
-            log.warning("Main profile %r not found, or has no SSO settings or sso_account_id", main_profile)
+            log.warning("Main profile %r not found or has no SSO settings", main_profile)
             main_url = None
         else:
             by_key[main.cache_key] = main
@@ -126,8 +126,16 @@ def run(args: argparse.Namespace, cfg: dict) -> int:
         return 2
     main_org = args.main_org or cfg["sso"]["main_org"]
     if args.main_profile or not main_org:
-        targets, main_url = plan_logins(profiles, main_profile=args.main_profile or cfg["sso"]["main_profile"],
-                                        manual=manual)
+        main_profile = args.main_profile or cfg["sso"]["main_profile"]
+        if any(p.name == main_profile for p in profiles):
+            targets, main_url = plan_logins(profiles, main_profile=main_profile, manual=manual)
+        else:
+            # Not a login target itself (no sso_account_id), but its start URL
+            # still decides which logins open the browser.
+            main_url = awsconfig.profile_start_url(parser, main_profile)
+            if main_url is None:
+                log.warning("Main profile %r not found or has no SSO settings", main_profile)
+            targets, main_url = plan_logins(profiles, main_url=main_url, manual=manual)
     elif main_org not in orgs:
         log.error("main_org %r is not an [orgs.*] table in %s", main_org, config.config_path())
         return 2

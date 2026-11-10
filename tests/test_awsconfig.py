@@ -227,3 +227,26 @@ def test_sso_refresh_manual_login_session_pattern_and_bad_type(isolated_aws, mon
     assert "Shared-ADM match manual_login but share main-org's token" in caplog.text
     cfg["sso"]["manual_login"] = [1]
     assert sso_refresh.run(args, cfg) == 2
+
+
+def test_sso_refresh_main_profile_without_account_still_picks_browser_login(isolated_aws, monkeypatch):
+    import argparse
+    from aws_toolbox import config
+    from aws_toolbox.commands import sso_refresh
+    (isolated_aws / "config").write_text(
+        "[profile main-org]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n\n"
+        "[profile acct]\nsso_start_url = https://acme.awsapps.com/start\nsso_region = us-east-1\n"
+        "sso_account_id = 111111111111\nsso_role_name = R\n\n"
+        "[profile other]\nsso_start_url = https://other.awsapps.com/start\nsso_region = us-east-1\n"
+        "sso_account_id = 222222222222\nsso_role_name = R\n")
+    calls = []
+    monkeypatch.setattr(sso_refresh.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(sso_refresh.subprocess, "run", lambda cmd: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(sso_refresh, "credentials_work", lambda p: False)
+    args = argparse.Namespace(force=False, main_org=None, main_profile=None, list=False, manual_login=None)
+    assert sso_refresh.run(args, config.load()) == 0
+    # main-org names no account, so it isn't logged in, but its URL still opens the browser.
+    assert calls == [
+        ["/usr/bin/aws", "sso", "login", "--profile", "acct"],
+        ["/usr/bin/aws", "sso", "login", "--profile", "other", "--no-browser"],
+    ]
