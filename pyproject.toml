@@ -15,6 +15,7 @@ aws-toolbox = "aws_toolbox.cli:main"
 aws-sso-refresh = "aws_toolbox.cli:sso_refresh_main"
 aws-sts-decode = "aws_toolbox.cli:sts_decode_main"
 aws-sync-profiles = "aws_toolbox.cli:sync_profiles_main"
+aws-ssm-connect = "aws_toolbox.cli:ssm_connect_main"
 ns-cert-refresh = "aws_toolbox.cli:ns_cert_refresh_main"
 # aws-assume-role must export into the calling shell, so it is a shell
 # function (shell/aws-toolbox.functions) wrapping `aws-toolbox assume-role`.

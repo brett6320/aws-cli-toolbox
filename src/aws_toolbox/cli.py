@@ -14,7 +14,7 @@ import sys
 from types import ModuleType
 
 from aws_toolbox import __version__, config
-from aws_toolbox.commands import assume_role, ns_cert, sso_refresh, sts_decode, sync_profiles
+from aws_toolbox.commands import assume_role, ns_cert, sso_refresh, ssm_connect, sts_decode, sync_profiles
 
 log = logging.getLogger("aws_toolbox")
 
@@ -23,6 +23,7 @@ COMMANDS: dict[str, tuple[ModuleType, str]] = {
     "assume-role": (assume_role, "Assume a role; prints shell exports"),
     "sts-decode": (sts_decode, "Decode an STS authorization failure message"),
     "sync-profiles": (sync_profiles, "Generate profiles for all Organization accounts"),
+    "ssm-connect": (ssm_connect, "Open a Session Manager shell on an instance"),
     "ns-cert-refresh": (ns_cert, "Build a CA bundle including Netskope certs"),
 }
 
@@ -129,6 +130,10 @@ def sts_decode_main() -> None:
 
 def sync_profiles_main() -> None:
     _standalone("sync-profiles")
+
+
+def ssm_connect_main() -> None:
+    _standalone("ssm-connect")
 
 
 def ns_cert_refresh_main() -> None:

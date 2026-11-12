@@ -16,4 +16,6 @@ Boto3 should use the system truststore (truststore module on macOS).
 
 - aws-sync-profiles - This connects to Organizations, enumerates accounts, and builds profiles based on the list of accounts. The default account is read-only, and profiles with an -adm suffix should use the privileged role specified in config files.
 
+- aws-ssm-connect - Opens a Session Manager shell on an instance. The account is derived from the profile chosen; the profile and instance are given as arguments or picked from a menu.
+
 - ns-cert-refresh - Locate the tenant CA certificates for the Netskope agent on the system and build a cert bundle for use by AWS CLI.

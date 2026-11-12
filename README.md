@@ -157,7 +157,7 @@ a different ref, pass `--ref <branch|tag|sha>`, or set it once with
 `install.sh` does four things:
 
 1. Installs the commands (`aws-toolbox`, `aws-sso-refresh`, `aws-sts-decode`,
-   `aws-sync-profiles`, `ns-cert-refresh`) into `~/.local/bin` from the
+   `aws-sync-profiles`, `aws-ssm-connect`, `ns-cert-refresh`) into `~/.local/bin` from the
    snapshot, so they don't depend on the repo afterwards:
    - **with uv** (the default when `uv` is on `PATH`): a regular, non-editable
      `uv tool install`, into uv's own tool environment;
@@ -727,6 +727,7 @@ the same account under the new naming.
 | `aws-whoami` | Prints profile, account, ARN, region (zsh) | No |
 | `aws-sts-decode [MESSAGE] [ACCOUNT]` | `sts:DecodeAuthorizationMessage`, pretty-printed | No |
 | `aws-sync-profiles` | Each org's accounts → SSO profiles (`<name>`, `<name>-adm`), or role-chained profiles per role in assume-role orgs; one block per org | Dry-run unless `--execute` |
+| `aws-ssm-connect [PROFILE] [INSTANCE]` | Session Manager shell on an instance in the profile's account; picks the profile and instance if not given | No |
 | `ns-cert-refresh` | Netskope tenant CA + system CAs → bundle | Dry-run unless `--execute` |
 | `aws-toolbox init` | Writes the starter `~/.aws/toolbox.toml` | Yes (`--force` to overwrite) |
 
@@ -738,11 +739,23 @@ Command options:
 | `aws-assume-role` | `--profile` (source credentials), `--session-name`, `--duration SECONDS`, `--format sh\|fish\|json` |
 | `aws-sts-decode` | `--profile` (decode with this profile), `--raw` (don't reformat the JSON) |
 | `aws-sync-profiles` | `--execute`/`--apply`, `--org ORG` (repeatable), `--profile` (override `management_profile`; one org), `--force` (rebuild with account names when the table is unreadable, or write an empty block). Table overrides, one org at a time: `--ddb-table-arn`, `--ddb-profile`, `--ddb-role-name`, `--attr-account-id`, `--attr-short-name`, `--attr-ou`, `--attr-environment`, `--roles A,B`, `--include-inactive` |
+| `aws-ssm-connect` | `--region` (default: `AWS_REGION`/`AWS_DEFAULT_REGION`, else the profile's, else `[defaults] region`), `--list` (print the profile's online instances) |
 | `ns-cert-refresh` | `--execute`/`--apply`, `--output PATH` (override `bundle_path`) |
 | `aws-toolbox init` | `--force` |
 
 `aws-sts-decode ACCOUNT` looks the account up among SSO profiles
 (`sso_account_id`) only. For a role-chained profile, pass `--profile` instead.
+
+`aws-ssm-connect` connects with the profile you name or pick, so the account
+is the profile's. Without an instance, it lists the profile's online
+SSM-managed instances to pick from. An instance is an ID (`i-…`, `mi-…`) or a
+Name tag; if several instances share the name, you pick one. A lone instance
+ID (`aws-ssm-connect i-…`) picks the profile. Menus use `fzf` when it's
+installed, else a numbered list. An exported `AWS_REGION` or
+`AWS_DEFAULT_REGION` beats the profile's region, as in the AWS CLI; pass
+`--region` if instances seem missing. It runs `aws ssm start-session`,
+which needs the
+[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
 
 Every command takes `-v`/`--verbose`, `-q`/`--quiet` and `--help`, placed after
 the command name. Each one also works as `aws-toolbox <command>`. Logs go to
@@ -772,6 +785,14 @@ warnings are yellow and errors red; set `NO_COLOR=1` to turn that off.
 - assume-role: `sts:AssumeRole` on the target role, which must also trust the caller
 - generated assume-role profiles: each first-hop permission set needs `sts:AssumeRole` on its target role, and each target role must trust that first hop; see [AWS side, per tier](#aws-side-per-tier)
 - sts-decode: `sts:DecodeAuthorizationMessage`, in the account that produced the message
+- ssm-connect:
+  - `ssm:StartSession` on the instance and on the session document
+    (`arn:aws:ssm:<region>::document/SSM-SessionManagerRunShell` unless the
+    account sets another), and `ssm:TerminateSession` on your own sessions;
+    `kms:GenerateDataKey` if session encryption is on;
+  - unless you pass an instance ID: `ssm:DescribeInstanceInformation` (also
+    for `--list`), and optionally `ec2:DescribeInstances` for Name tags
+    (without it, the agent's computer name is shown)
 
 ## Development
 
