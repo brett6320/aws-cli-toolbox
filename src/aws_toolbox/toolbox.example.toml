@@ -27,8 +27,8 @@ duration_seconds = 3600
 # Single-org setup. With [orgs.<name>] tables (below), [sync] only supplies
 # shared defaults: readonly_role, admin_role, admin_suffix, roles,
 # role_suffixes, require_short_name, account_name_aliases, ddb_role_name,
-# attr_* and include_inactive. Its other keys are then ignored, except that
-# ddb_table_arn / ddb_profile there are an error.
+# attr_*, include_inactive and short_name_tag. Its other keys are then
+# ignored, except that ddb_table_arn / ddb_profile there are an error.
 [sync]
 # Profile with organizations:ListAccounts in the management account.
 management_profile = "main-org"
@@ -102,6 +102,7 @@ exclude_accounts = []
 # attr_ou = "ou"
 # attr_environment = "environment"
 # include_inactive = false
+# short_name_tag = "Shortname"   # Organizations tag for accounts the table doesn't name
 
 [netskope]
 bundle_path = "~/.aws/ca-bundle.pem"

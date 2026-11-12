@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 from botocore import exceptions as botocore_exc
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_toolbox import account_meta, awsconfig, config
@@ -129,6 +130,37 @@ def apply_short_names(accounts: list[dict], org: dict) -> None:
         short = org["short_names"].get(acct["id"])
         if short:
             acct["shortName"], acct["fixedName"] = short, True
+
+
+# One call per account: retry throttling harder than the default client does.
+TAG_CLIENT_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
+# An account closed or moved out after the org tree was read.
+GONE_ERROR_CODES = {"TargetNotFoundException", "AccountNotFoundException"}
+
+
+def tag_short_names(org_client, account_ids: list[str], key: str) -> dict[str, str]:
+    """{account id: short name} from each account's Organizations tag `key` (exact, case-sensitive).
+
+    Blank values are left out. One ListTagsForResource call per account.
+    """
+    out = {}
+    for acct_id in account_ids:
+        try:
+            for page in org_client.get_paginator("list_tags_for_resource").paginate(ResourceId=acct_id):
+                for tag in page["Tags"]:
+                    if tag["Key"] == key and tag["Value"].strip():
+                        out[acct_id] = tag["Value"].strip().lower()  # lowercase, like table short codes
+        except ClientError as e:
+            if e.response["Error"]["Code"] not in GONE_ERROR_CODES:
+                raise
+            log.debug("Account %s left the org during the run; no tag", acct_id)
+    return out
+
+
+def apply_tag_short_names(accounts: list[dict], tagged: dict[str, str]) -> None:
+    for acct in accounts:
+        if acct["id"] in tagged:
+            acct["shortName"] = tagged[acct["id"]]
 
 
 def build_block(accounts: list[dict], org: dict, defaults: dict, reserved: set[str]) -> str:
@@ -386,6 +418,9 @@ def meta_settings(org: dict, args: argparse.Namespace, name: str = "") -> dict:
                              "set source_profile or add them to role_source_profiles")
     if not isinstance(org["require_short_name"], bool):
         raise ValueError("require_short_name must be true or false")
+    tag_key = org["short_name_tag"]
+    if not isinstance(tag_key, str) or tag_key != tag_key.strip():
+        raise ValueError("short_name_tag must be an Organizations tag key, without surrounding spaces")
     if not isinstance(org["account_name_aliases"], bool):
         raise ValueError("account_name_aliases must be true or false")
     return settings
@@ -462,7 +497,8 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
     log.debug("%s: org profile %s, table %s", _label(name), s["profile"], s["ddb_table_arn"])
     try:
         org_session = account_meta.get_session(s["profile"], s["region"])
-        tree = account_meta.fetch_org(get_client("organizations", org_session), s["include_inactive"])
+        org_client = get_client("organizations", org_session)
+        tree = account_meta.fetch_org(org_client, s["include_inactive"])
         partition = org_session.get_partition_for_region(s["region"])
     except ClientError as e:
         log.error("%s: AWS error %s: %s", _label(name), e.response["Error"]["Code"],
@@ -473,10 +509,12 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
         return None
     stats["accounts"] = len(tree["accounts"])
 
+    tag_key = org["short_name_tag"]
+    fallback = f"their {tag_key!r} tag, else their account" if tag_key else "their accounts"
     if not s["ddb_table_arn"]:
-        log.warning("%s: no metadata table configured (ddb_table_arn); naming profiles after "
-                    "their accounts%s", _label(name),
-                    " and ignoring require_short_name" if org["require_short_name"] else "")
+        log.warning("%s: no metadata table configured (ddb_table_arn); naming profiles after %s%s",
+                    _label(name), fallback,
+                    " and ignoring require_short_name" if org["require_short_name"] and not tag_key else "")
         table = None
     else:
         try:
@@ -491,38 +529,64 @@ def _sync_role_org(name: str, org: dict, text: str, settings: dict, args: argpar
             if not args.force:
                 # A temporary access problem must not rename every existing profile.
                 log.error("%s: no access to the metadata table; leaving existing profiles as they "
-                          "are (use --force to rebuild them with account names)", _label(name))
+                          "are (use --force to rebuild them without table short names)", _label(name))
                 return None
-            log.warning("%s: --force: rebuilding existing profiles with account names", _label(name))
-        log.warning("%s: can't read the metadata table; naming profiles after their accounts. "
+            log.warning("%s: --force: rebuilding existing profiles without table short names", _label(name))
+        log.warning("%s: can't read the metadata table; naming profiles after %s. "
                     "Run again once a generated profile for account %s can read it, to switch "
-                    "to short names.", _label(name), s["ddb_account_id"])
+                    "to short names.", _label(name), fallback, s["ddb_account_id"])
         meta, dupes = {}, set()
     else:
         meta, dupes = table
-    # A pinned account's name doesn't depend on its (ambiguous) table rows.
+        kept = set(tree["accounts"]) - dupes
+        if kept and not kept & set(meta) and not args.force:
+            # Wrong table/BG_ATTR_* names would otherwise rename every profile.
+            # Checked before the tag lookup, which would otherwise cover every account.
+            log.error("%s: no account matched a row in %s; check BG_DDB_TABLE_ARN and BG_ATTR_* "
+                      "(use --force to generate names without the table)", _label(name), s["ddb_table"])
+            return None
+
+    tagged: dict[str, str] = {}
+    tags_read = False
+    if tag_key:
+        # The table wins: only accounts it doesn't name (no row, a blank one,
+        # or duplicate rows) are looked up. Pinned and excluded accounts aren't.
+        excluded = {str(x) for x in org["exclude_accounts"]}
+        need = [k for k in tree["accounts"] if k not in org["short_names"] and k not in excluded
+                and (k in dupes or not str(meta.get(k, {}).get("shortName") or "").strip())]
+        try:
+            client = org_session.client("organizations", region_name=s["region"], config=TAG_CLIENT_CONFIG)
+            tagged = tag_short_names(client, need, tag_key)
+        except (ClientError, BotoCoreError) as e:
+            why = e.response["Error"]["Code"] if isinstance(e, ClientError) else str(e)
+            if awsconfig.has_managed_block(text, name) and not args.force:
+                # Same as the table: a temporary problem must not rename profiles.
+                log.error("%s: can't read account tags (%s); leaving existing profiles as they are "
+                          "(use --force to rebuild them without tag short names)", _label(name), why)
+                return None
+            log.warning("%s: can't read account tags (%s); not using short_name_tag", _label(name), why)
+        else:
+            tags_read = True
+            log.info("%s: %d of %d accounts without a table short name have a %r tag",
+                     _label(name), len(tagged), len(need), tag_key)
+    # A pinned or tagged account's name doesn't depend on its (ambiguous) table rows.
     tree = {**tree, "accounts": {k: v for k, v in tree["accounts"].items()
-                                 if k not in dupes or k in org["short_names"]}}
+                                 if k not in dupes or k in org["short_names"] or k in tagged}}
     accounts = account_meta.merge(tree, meta)
     warn_unknown_short_names(accounts, org, _label(name))
+    apply_tag_short_names(accounts, tagged)
     apply_short_names(accounts, org)
-    if table is not None:
-        matched = sum(1 for a in accounts if a["hasMetadata"])
-        if accounts and not matched and not args.force:
-            # Wrong table/BG_ATTR_* names would otherwise rename every profile.
-            log.error("%s: no account matched a row in %s; check BG_DDB_TABLE_ARN and BG_ATTR_* "
-                      "(use --force to generate names from account names)", _label(name), s["ddb_table"])
-            return None
-        if org["require_short_name"]:
-            # The table's own account always stays: its profiles are how later
-            # runs read the table if the configured access fails.
-            named = [a for a in accounts if a["id"] == s["ddb_account_id"]
-                     or a.get("fixedName") or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
-            skipped = sorted(a["id"] for a in accounts if a not in named)
-            if skipped:
-                log.warning("%s: require_short_name: skipping %d account(s) with no short name in the "
-                            "table or short_names: %s", _label(name), len(skipped), ", ".join(skipped))
-            accounts = named
+    if org["require_short_name"] and (table is not None or tags_read):
+        # The table's own account always stays: its profiles are how later
+        # runs read the table if the configured access fails.
+        named = [a for a in accounts if a["id"] == s["ddb_account_id"] or a.get("fixedName")
+                 or a["id"] in tagged or str(meta.get(a["id"], {}).get("shortName") or "").strip()]
+        skipped = sorted(a["id"] for a in accounts if a not in named)
+        if skipped:
+            log.warning("%s: require_short_name: skipping %d account(s) with no short name in the "
+                        "table, short_names or short_name_tag: %s",
+                        _label(name), len(skipped), ", ".join(skipped))
+        accounts = named
     if s["ddb_account_id"] and (s["ddb_account_id"] not in {a["id"] for a in accounts} or
                                 s["ddb_account_id"] in {str(x) for x in org["exclude_accounts"]}):
         log.warning("%s: no profiles for the table's account %s (excluded, inactive, duplicate rows "

@@ -61,6 +61,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # profiles become <profile_prefix>billing<suffix>, whatever the table or
         # the account name says. Per org, never inherited.
         "short_names": {},
+        # Assume-role mode: Organizations tag key holding an account's short
+        # name, e.g. "Shortname". Used for accounts the table doesn't name
+        # (no row, a blank one, or duplicate rows). "" = off.
+        "short_name_tag": "",
     },
     "netskope": {
         "bundle_path": "~/.aws/ca-bundle.pem",
@@ -76,7 +80,7 @@ ORG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # can't point one org's profiles at another org's portal.
 INHERITED_SYNC_KEYS = ("readonly_role", "admin_role", "admin_suffix", "roles", "role_suffixes",
                        "require_short_name", "account_name_aliases", "ddb_role_name", "attr_account_id", "attr_short_name",
-                       "attr_ou", "attr_environment", "include_inactive")
+                       "attr_ou", "attr_environment", "include_inactive", "short_name_tag")
 
 
 def aws_dir() -> Path:
