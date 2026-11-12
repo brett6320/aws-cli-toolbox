@@ -243,7 +243,7 @@ def fetch_metadata(ddb, table: str, attrs: Mapping[str, str]) -> tuple[dict[str,
             "envRaw": row.get(attrs["environment"]),
         }
     for acct_id in sorted(dupes):
-        log.warning("Account %s appears in more than one table row; skipping it", acct_id)
+        log.warning("Account %s appears in more than one table row; ignoring its rows", acct_id)
     log.info("Loaded metadata for %d accounts", len(out))
     return out, dupes
 

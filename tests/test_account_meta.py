@@ -7,7 +7,7 @@ import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from aws_toolbox import account_meta, config
+from aws_toolbox import account_meta, awsconfig, config
 from aws_toolbox.commands import sync_profiles
 
 TABLE_ARN = "arn:aws:dynamodb:us-east-1:123456789012:table/account-mapping"  # moto's default account
@@ -673,9 +673,102 @@ def test_sync_summary_follows_the_diff_with_counts_and_held_warnings(isolated_aw
             assert sync_profiles.run(_args(force=True), cfg) == 0
         finally:
             logging.getLogger().removeHandler(handler)
-    dupe = f"Account {twice} appears in more than one table row; skipping it"
+    dupe = f"Account {twice} appears in more than one table row; ignoring its rows"
     # the duplicate-row warning is held until after the diff, under the summary line
     assert order.index("diff") < order.index("Summary:") < order.index(dupe)
     summary = next(m for m in order if m.startswith("[sync]: ") and "accounts in the org" in m)
     assert summary.startswith("[sync]: 3 accounts in the org; 2 profiles for 2 accounts")
     assert order.index(summary) < order.index(dupe)
+
+
+@mock_aws
+def test_sync_short_name_tag_fills_gaps_after_the_table(isolated_aws, caplog):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+
+    def account(name, tag=None):
+        tags = [{"Key": "Shortname", "Value": tag}] if tag else []
+        return org.create_account(AccountName=name, Email=f"{name}@example.com",
+                                  Tags=tags)["CreateAccountStatus"]["AccountId"]
+
+    in_table = account("In Table", tag="ignored")  # the table wins over the tag
+    tagged = account("Tagged Only", tag=" TagOps ")
+    twice = account("Twice", tag="twice-tag")      # duplicate rows, rescued by the tag
+    neither = account("Neither")
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(TableName="account-mapping", BillingMode="PAY_PER_REQUEST",
+                     KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                     AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
+    for i, (acct, short) in enumerate(((in_table, "tbl"), (twice, "tw1"), (twice, "tw2"))):
+        ddb.put_item(TableName="account-mapping", Item={
+            "pk": {"S": str(i)}, "accountNumber": {"S": acct}, "accountShortCode": {"S": short}})
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    cfg = _role_cfg(roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"}, short_name_tag="Shortname")
+    assert sync_profiles.run(_args(execute=True), cfg) == 0
+    text = path.read_text()
+    assert f"[profile corp-tbl-ro]\nrole_arn = arn:aws:iam::{in_table}:" in text
+    assert f"[profile corp-tagops-ro]\nrole_arn = arn:aws:iam::{tagged}:" in text
+    assert f"[profile corp-twice-tag-ro]\nrole_arn = arn:aws:iam::{twice}:" in text
+    assert f"[profile corp-neither-ro]\nrole_arn = arn:aws:iam::{neither}:" in text
+    assert "corp-ignored" not in text
+
+    # require_short_name keeps tagged accounts and skips the rest
+    cfg["sync"]["require_short_name"] = True
+    assert sync_profiles.run(_args(execute=True), cfg) == 0
+    text = path.read_text()
+    assert "corp-tagops-ro" in text and "corp-twice-tag-ro" in text and "corp-neither-ro" not in text
+
+    # unreadable tags leave an existing block alone unless --force
+    denied = ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "ListTagsForResource")
+    with mock.patch.object(sync_profiles, "tag_short_names", side_effect=denied):
+        assert sync_profiles.run(_args(execute=True), cfg) == 1
+        assert path.read_text() == text
+        assert "can't read account tags (AccessDeniedException)" in caplog.text
+
+
+
+@mock_aws
+def test_sync_short_name_tag_pin_wins_and_lookup_failures(isolated_aws, caplog):
+    org = boto3.client("organizations", region_name="us-east-1")
+    org.create_organization(FeatureSet="ALL")
+    pinned = org.create_account(AccountName="Pinned", Email="p@example.com",
+                                Tags=[{"Key": "Shortname", "Value": "fromtag"}])["CreateAccountStatus"]["AccountId"]
+    tagged = org.create_account(AccountName="Tagged", Email="t@example.com",
+                                Tags=[{"Key": "Shortname", "Value": "tg"}])["CreateAccountStatus"]["AccountId"]
+    excluded = org.create_account(AccountName="Excluded", Email="x@example.com")["CreateAccountStatus"]["AccountId"]
+    path = isolated_aws / "config"
+    path.write_text(CORP_CONFIG)
+    # no table: tags still name accounts, and require_short_name applies
+    cfg = _role_cfg(ddb_table_arn="", roles=["ReadOnly"], role_suffixes={"ReadOnly": "-ro"},
+                    short_name_tag="Shortname", short_names={pinned: "pin"}, require_short_name=True,
+                    exclude_accounts=[excluded])
+    looked_up = []
+    real = sync_profiles.tag_short_names
+    with mock.patch.object(sync_profiles, "tag_short_names",
+                           side_effect=lambda c, ids, key: looked_up.extend(ids) or real(c, ids, key)):
+        assert sync_profiles.run(_args(execute=True), cfg) == 0
+    text = path.read_text()
+    assert "[profile corp-pin-ro]" in text and "[profile corp-tg-ro]" in text and "fromtag" not in text
+    assert pinned not in looked_up and excluded not in looked_up and tagged in looked_up
+    # the untagged, unpinned management account is skipped by require_short_name
+    assert sorted(awsconfig.read_text(awsconfig.managed_block(text)).sections()) == \
+        ["profile corp-pin-ro", "profile corp-tg-ro"]
+
+    # an account that leaves the org mid-run just has no tag
+    gone = ClientError({"Error": {"Code": "TargetNotFoundException", "Message": "gone"}}, "ListTagsForResource")
+    client = mock.Mock()
+    client.get_paginator.return_value.paginate.side_effect = [gone, [{"Tags": [{"Key": "Shortname", "Value": "X"}]}]]
+    assert sync_profiles.tag_short_names(client, ["111111111111", "222222222222"], "Shortname") == {"222222222222": "x"}
+
+    # no managed block yet: a tag failure warns and carries on; --force does too over a block
+    denied = ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "ListTagsForResource")
+    cfg["sync"]["require_short_name"] = False
+    with mock.patch.object(sync_profiles, "tag_short_names", side_effect=denied):
+        path.write_text(CORP_CONFIG)
+        assert sync_profiles.run(_args(execute=True), cfg) == 0
+        assert "not using short_name_tag" in caplog.text and "[profile corp-tagged-ro]" in path.read_text()
+        assert sync_profiles.run(_args(execute=True, force=True), cfg) == 0
+
+    cfg["sync"]["short_name_tag"] = " Shortname"
+    assert sync_profiles.run(_args(), cfg) == 2

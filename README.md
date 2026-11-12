@@ -292,7 +292,7 @@ profile_prefix = "globex-"
 - These `[sync]` keys are shared by every org unless the org sets its own:
   - `readonly_role`, `admin_role`, `admin_suffix`;
   - `roles`, `role_suffixes`, `require_short_name`, `account_name_aliases`;
-  - `ddb_role_name`, the `attr_*` keys, `include_inactive`.
+  - `ddb_role_name`, the `attr_*` keys, `include_inactive`, `short_name_tag`.
 
   Every other key is per org. `ddb_table_arn`, `ddb_profile`, `source_profile`
   and `role_source_profiles` in `[sync]` are an error once `[orgs.*]` tables
@@ -341,11 +341,29 @@ Table settings (per org unless noted; all optional except `ddb_table_arn`):
 | `ddb_role_name` | `OrganizationAccountAccessRole` | Role assumed in the table's account when no profile there works. `[sync]` or per org. |
 | `attr_account_id` / `attr_short_name` / `attr_ou` / `attr_environment` | `accountNumber` / `accountShortCode` / `ou` / `environment` | Table attribute names. `[sync]` or per org. |
 | `include_inactive` | `false` | Include suspended, pending-closure and closed accounts. `[sync]` or per org. |
+| `short_name_tag` | — | Organizations tag key (exact, case-sensitive) whose value is the account's short name, used when the table doesn't name the account. `[sync]` or per org. |
+
+**Short names from Organizations tags:** with `short_name_tag` set, an account
+the table doesn't name (no row, a blank short name, or more than one row) takes
+its short name from that tag, lowercased like table short codes. The order is
+`short_names`, then the table, then the tag, then the account name. A tagged
+account counts as named for `require_short_name`. An account with duplicate
+table rows that has the tag is kept. Tags are read with one
+`organizations:ListTagsForResource` call per account that needs one (excluded
+and pinned accounts are never looked up). If that fails and the org already has
+a managed block, the org is left as it was unless you pass `--force`, so a
+permissions problem can't rename its profiles. Tags work without a table too.
+The setting only applies to assume-role orgs.
+
+A tag that equals another account's table short name is a name clash like any
+other: both accounts get their account ID appended, the table-named one included.
+Fix the tag or the table if you see that in the summary.
 
 **No table configured:** without `ddb_table_arn`, the run warns and still
-generates every profile, named after the account (`acme-shared-services-ro`),
-with no domain or environment in the comment line. `require_short_name` is
-ignored. Add `ddb_table_arn` later and run again to switch to short names.
+generates every profile, named after the account (`acme-shared-services-ro`), or
+after its `short_name_tag` tag if that's set, with no domain or environment in the
+comment line. `require_short_name` is ignored unless `short_name_tag` is set.
+Add `ddb_table_arn` later and run again to switch to short names.
 
 - **Accounts:** the full OU tree from the root. Suspended, pending-closure and
   closed accounts are skipped unless you set `include_inactive = true` or pass
@@ -354,7 +372,8 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
   `accountNumber` (zero-padded to 12 digits). It's read with `ddb_profile`,
   else the Organizations profile if it's in the table's account, else by
   assuming `ddb_role_name`. The run stops if those credentials aren't in the
-  table's account. An account with more than one row is skipped with a warning.
+  table's account. An account with more than one row is skipped with a warning,
+  unless it's pinned in `short_names` or named by its `short_name_tag` tag.
   The table is only read, never written.
 - **Names:** `<prefix><short name><suffix>`, where the short name is
   `accountShortCode` (lowercased), falling back to the account name. Each
@@ -378,7 +397,8 @@ ignored. Add `ddb_table_arn` later and run again to switch to short names.
 - **Only accounts with a short name:** set `require_short_name = true` (in
   `[sync]` or per org; assume-role orgs only) to skip accounts whose short-name
   attribute (default `accountShortCode`) is empty or that have no table row,
-  instead of naming them after the account. The table's own account is always
+  instead of naming them after the account. An account with a `short_name_tag`
+  tag counts as named. The table's own account is always
   kept, because later runs may need its profiles to read the table.
 - **Long and short names:** set `account_name_aliases = true` (in `[sync]` or
   per org) to also write each account's profiles under its account name, so
@@ -738,7 +758,7 @@ Command options:
 | `aws-sso-refresh` | `--force` (log in even if the token is valid), `--main-org ORG`, `--main-profile PROFILE`, `--manual-login PATTERN`, `--list` (show targets and token status) |
 | `aws-assume-role` | `--profile` (source credentials), `--session-name`, `--duration SECONDS`, `--format sh\|fish\|json` |
 | `aws-sts-decode` | `--profile` (decode with this profile), `--raw` (don't reformat the JSON) |
-| `aws-sync-profiles` | `--execute`/`--apply`, `--org ORG` (repeatable), `--profile` (override `management_profile`; one org), `--force` (rebuild with account names when the table is unreadable, or write an empty block). Table overrides, one org at a time: `--ddb-table-arn`, `--ddb-profile`, `--ddb-role-name`, `--attr-account-id`, `--attr-short-name`, `--attr-ou`, `--attr-environment`, `--roles A,B`, `--include-inactive` |
+| `aws-sync-profiles` | `--execute`/`--apply`, `--org ORG` (repeatable), `--profile` (override `management_profile`; one org), `--force` (rebuild without table or tag short names when either is unreadable, or write an empty block). Table overrides, one org at a time: `--ddb-table-arn`, `--ddb-profile`, `--ddb-role-name`, `--attr-account-id`, `--attr-short-name`, `--attr-ou`, `--attr-environment`, `--roles A,B`, `--include-inactive` |
 | `aws-ssm-connect` | `--region` (default: `AWS_REGION`/`AWS_DEFAULT_REGION`, else the profile's, else `[defaults] region`), `--list` (print the profile's online instances) |
 | `ns-cert-refresh` | `--execute`/`--apply`, `--output PATH` (override `bundle_path`) |
 | `aws-toolbox init` | `--force` |
@@ -777,6 +797,7 @@ warnings are yellow and errors red; set `NO_COLOR=1` to turn that off.
     `organizations:ListOrganizationalUnitsForParent`,
     `organizations:ListAccountsForParent`, `organizations:DescribeOrganization`
     and `sts:GetCallerIdentity`;
+  - with `short_name_tag`: also `organizations:ListTagsForResource`;
   - for the credentials that read the table: `dynamodb:Scan` on the table;
   - when the table is read through `ddb_role_name`: `sts:AssumeRole` on that
     role in the table's account.
