@@ -250,3 +250,25 @@ def test_sso_refresh_main_profile_without_account_still_picks_browser_login(isol
         ["/usr/bin/aws", "sso", "login", "--profile", "acct"],
         ["/usr/bin/aws", "sso", "login", "--profile", "other", "--no-browser"],
     ]
+
+
+def test_credentials_work_hides_botocore_refresh_tracebacks(monkeypatch, caplog):
+    import logging
+    from botocore.exceptions import TokenRetrievalError
+    from aws_toolbox.commands import sso_refresh
+
+    def failing_session(name, region):
+        logging.getLogger("botocore.tokens").warning("SSO token refresh attempt failed")
+        raise TokenRetrievalError(provider="sso", error_msg="Token has expired and refresh failed")
+
+    monkeypatch.setattr(sso_refresh, "get_session", failing_session)
+    profile = awsconfig.SsoProfile(name="p", start_url="https://x/start", region="us-east-1",
+                                   session=None, account_id="111111111111", role_name="R")
+    caplog.set_level(logging.INFO)
+    assert sso_refresh.credentials_work(profile) is False
+    assert "refresh attempt failed" not in caplog.text
+    assert logging.getLogger("botocore.tokens").level == logging.NOTSET  # restored
+    # -v keeps them
+    caplog.set_level(logging.DEBUG)
+    assert sso_refresh.credentials_work(profile) is False
+    assert "refresh attempt failed" in caplog.text

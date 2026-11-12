@@ -90,6 +90,9 @@ def org_start_url(parser, org: dict) -> str | None:
     return org["sso_start_url"].rstrip("/") or None
 
 
+QUIET_LOGGERS = ("botocore.tokens", "botocore.credentials")
+
+
 def credentials_work(profile: awsconfig.SsoProfile) -> bool:
     """True if the profile can call STS now.
 
@@ -99,11 +102,20 @@ def credentials_work(profile: awsconfig.SsoProfile) -> bool:
     """
     if not (profile.account_id and profile.role_name):
         return False
+    # A rejected refresh token makes botocore log WARNINGs with full
+    # tracebacks; here it only means "log in", so keep them out unless -v.
+    quiet = [] if log.isEnabledFor(logging.DEBUG) else [logging.getLogger(n) for n in QUIET_LOGGERS]
+    levels = [q.level for q in quiet]
+    for q in quiet:
+        q.setLevel(logging.ERROR)
     try:
         get_client("sts", get_session(profile.name, profile.region or None)).get_caller_identity()
     except (BotoCoreError, ClientError) as e:
         log.debug("Credential check for %s failed: %s", profile.name, e)
         return False
+    finally:
+        for q, level in zip(quiet, levels):
+            q.setLevel(level)
     return True
 
 
