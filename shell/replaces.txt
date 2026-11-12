@@ -16,6 +16,7 @@ _aws_profile_complete
 aws-sso-refresh
 aws-sts-decode
 aws-sync-profiles
+aws-ssm-connect
 ns-cert-refresh
 
 # Superseded (logic absorbed or replaced; see README "Migrating")

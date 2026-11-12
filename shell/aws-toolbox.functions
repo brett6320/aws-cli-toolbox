@@ -138,4 +138,5 @@ _aws_profile_complete() {
 }
 if (( $+functions[compdef] )); then
   compdef _aws_profile_complete aws-profile
+  compdef _aws_profile_complete aws-ssm-connect
 fi
