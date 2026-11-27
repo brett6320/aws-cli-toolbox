@@ -201,8 +201,12 @@ if (( status )); then
 fi
 
 snap="$(mktemp -d "${TMPDIR:-/tmp}/aws-cli-toolbox.XXXXXX")"
-trap 'rm -rf "$snap"' EXIT
-git -C "$repo" archive "$commit" | tar -x -C "$snap"
+trap 'rm -rf "$snap" "$snap.tar"' EXIT
+# Not a pipe: bsdtar can exit at end-of-archive while git still writes padding,
+# and the resulting SIGPIPE (141) fails the script under pipefail.
+git -C "$repo" archive --format=tar -o "$snap.tar" "$commit"
+tar -x -C "$snap" -f "$snap.tar"
+rm -f "$snap.tar"
 echo "==> Installing $ref @ $short from $repo (snapshot, not the working tree)"
 
 # --- 1. console scripts ------------------------------------------------------
